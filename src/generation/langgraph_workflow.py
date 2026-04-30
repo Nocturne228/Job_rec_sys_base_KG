@@ -68,7 +68,7 @@ class WorkflowState:
     job_preferred_skills: Dict[str, str] = field(default_factory=dict)  # skill_id -> min_level
 
     # Graph retrieval results
-    skill_gap: Dict[str, Dict[str, str]] = field(default_factory=dict)  # skill_id -> {user_level, required_level}
+    skill_gap: Dict[str, Dict[str, Optional[str]]] = field(default_factory=dict)  # skill_id -> {user_level, required_level}
     shortest_paths: List[List[str]] = field(default_factory=list)  # List of skill paths
     skill_coverage: float = 0.0
 

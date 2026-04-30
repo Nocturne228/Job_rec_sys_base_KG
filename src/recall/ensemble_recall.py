@@ -58,7 +58,9 @@ class EnsembleRecall:
                           item_embeddings: Optional[np.ndarray] = None,
                           k: int = 10,
                           exclude_interacted: bool = True,
-                          interacted_items: Optional[List[str]] = None) -> List[RecallResult]:
+                          interacted_items: Optional[List[str]] = None,
+                          item_idx_to_job_id: Optional[Dict[int, str]] = None,
+                          job_id_to_item_idx: Optional[Dict[str, int]] = None) -> List[RecallResult]:
         """
         Generate ensemble recommendations for a user.
 
@@ -70,6 +72,8 @@ class EnsembleRecall:
             k: Number of recommendations
             exclude_interacted: Whether to exclude interacted items
             interacted_items: List of job IDs the user has interacted with
+            item_idx_to_job_id: Optional mapping from LightGCN item index to job ID
+            job_id_to_item_idx: Optional mapping from job ID to LightGCN item index
 
         Returns:
             List of RecallResult objects sorted by combined score
@@ -88,6 +92,15 @@ class EnsembleRecall:
                     ]
                 elif isinstance(interacted_items, list) and all(isinstance(x, int) for x in interacted_items):
                     interacted_indices = interacted_items
+                elif (
+                    isinstance(interacted_items, list)
+                    and job_id_to_item_idx is not None
+                ):
+                    interacted_indices = [
+                        job_id_to_item_idx[job_id]
+                        for job_id in interacted_items
+                        if job_id in job_id_to_item_idx
+                    ]
 
             # Get LightGCN recommendations
             item_indices, lg_scores = self.lightgcn.recommend_for_user(
@@ -98,6 +111,13 @@ class EnsembleRecall:
                 exclude_interacted=exclude_interacted,
                 interacted_items=interacted_indices
             )
+            lightgcn_recommendations = [
+                (
+                    item_idx_to_job_id[item_idx] if item_idx_to_job_id and item_idx in item_idx_to_job_id else str(item_idx),
+                    float(score),
+                )
+                for item_idx, score in zip(item_indices, lg_scores)
+            ]
 
         # Get SBERT recommendations
         sbert_recommendations = self.sbert.recommend_for_user(user_id, k=k * 2)
@@ -198,7 +218,12 @@ class EnsembleRecall:
     def evaluate_ensemble(self,
                          user_ids: List[str],
                          true_positives: Dict[str, List[str]],
-                         k_values: List[int] = [5, 10, 20]) -> Dict[str, Dict[int, float]]:
+                         k_values: List[int] = [5, 10, 20],
+                         user_embeddings=None,
+                         item_embeddings=None,
+                         item_idx_to_job_id=None,
+                         job_id_to_item_idx=None,
+                         user_id_to_idx=None) -> Dict[str, Dict[int, float]]:
         """
         Evaluate ensemble recall performance.
 
@@ -206,6 +231,11 @@ class EnsembleRecall:
             user_ids: List of user IDs to evaluate
             true_positives: Dict mapping user_id to list of relevant job IDs
             k_values: List of k values for recall@k
+            user_embeddings: LightGCN user embeddings (optional; SBERT-only if absent)
+            item_embeddings: LightGCN item embeddings
+            item_idx_to_job_id: LightGCN internal index -> job ID mapping
+            job_id_to_item_idx: job ID -> LightGCN internal index mapping
+            user_id_to_idx: user ID -> LightGCN internal index mapping
 
         Returns:
             Dictionary of metrics for each k value
@@ -213,8 +243,16 @@ class EnsembleRecall:
         metrics = {k: {"recall": 0.0, "precision": 0.0} for k in k_values}
 
         for user_id in user_ids:
-            # Get recommendations (simplified - need proper LightGCN indices)
-            recommendations = self.recommend_for_user(user_id, k=max(k_values))
+            user_idx = (user_id_to_idx.get(user_id)
+                       if user_id_to_idx else None)
+            recommendations = self.recommend_for_user(
+                user_id, k=max(k_values),
+                user_idx=user_idx,
+                user_embeddings=user_embeddings,
+                item_embeddings=item_embeddings,
+                item_idx_to_job_id=item_idx_to_job_id,
+                job_id_to_item_idx=job_id_to_item_idx,
+            )
 
             # Get recommended job IDs
             rec_job_ids = [rec.job_id for rec in recommendations]

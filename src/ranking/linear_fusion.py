@@ -135,12 +135,12 @@ class LinearFusionRanker:
             features_list.append(features)
 
         # Rank jobs
-        sorted_indices, scores = self.rank(features_list, return_scores=True)
+        sorted_indices, sorted_scores = self.rank(features_list, return_scores=True)
 
         # Create results
         results = []
-        for idx in sorted_indices:
-            results.append((job_ids[idx], scores[idx]))
+        for idx, score in zip(sorted_indices, sorted_scores):
+            results.append((job_ids[idx], float(score)))
 
         return results
 

@@ -54,7 +54,7 @@ class DataConfig(BaseModel):
     # 数据集规模
     n_users: int = Field(default=20, description="模拟数据中的用户数量")
     n_jobs: int = Field(default=50, description="模拟数据中的岗位数量")
-    n_skills: int = Field(default=21, description="模拟数据中的技能数量")
+    n_skills: int = Field(default=22, description="模拟数据中的技能数量")
 
     # 交互率
     application_rate: float = Field(default=0.2, description="用户投递岗位的概率")

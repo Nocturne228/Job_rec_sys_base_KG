@@ -379,8 +379,6 @@ class ABExperiment:
         grp = self.assignments.get(user_id)
         if grp is None:
             return
-        self._totals_a.setdefault(grp, 0)
-        self._totals_b.setdefault(grp, 0)
         if grp == "A":
             self._totals_a["total"] = self._totals_a.get("total", 0) + 1
         else:

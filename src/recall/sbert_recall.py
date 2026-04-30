@@ -4,6 +4,7 @@ Semantic recall using Sentence-BERT (SBERT) for cold-start scenarios.
 import numpy as np
 from typing import List, Dict, Tuple, Optional, Any
 import logging
+import hashlib
 
 # Try to import sentence-transformers, but provide fallback for simulation
 try:
@@ -66,9 +67,10 @@ class SBERTRecall:
         else:
             # Simulate embedding (deterministic from text hash)
             # In a real system, this would be actual SBERT embeddings
-            seed = hash(text) % (2**32)
-            np.random.seed(seed)
-            embedding = np.random.randn(self.embedding_dim).astype(np.float32)
+            seed_bytes = hashlib.sha256(text.encode("utf-8")).digest()[:4]
+            seed = int.from_bytes(seed_bytes, byteorder="little", signed=False)
+            rng = np.random.default_rng(seed)
+            embedding = rng.standard_normal(self.embedding_dim, dtype=np.float32)
             embedding = embedding / np.linalg.norm(embedding)  # Normalize
             return embedding
 
@@ -150,7 +152,7 @@ class SBERTRecall:
             return []
 
         # Use FAISS for efficient search if available
-        if self.use_faiss and self.faiss_index is not None:
+        if self.use_faiss and self.faiss_index is not None and job_ids == self.job_ids:
             # Search using FAISS
             distances, indices = self.faiss_index.search(user_vec, min(k, len(job_ids)))
 
@@ -209,7 +211,7 @@ class SBERTRecall:
             pickle.dump(data, f)
 
     def load_embeddings(self, path: str) -> None:
-        """Load embeddings from disk."""
+        """Load embeddings from disk. Reinitializes the SBERT model for new encodings."""
         import pickle
         with open(path, 'rb') as f:
             data = pickle.load(f)
@@ -219,6 +221,13 @@ class SBERTRecall:
         self.job_ids = data['job_ids']
         self.embedding_dim = data['embedding_dim']
         self.model_name = data['model_name']
+
+        # Reinitialize the SBERT model for future encodings
+        try:
+            from sentence_transformers import SentenceTransformer
+            self.model = SentenceTransformer(self.model_name)
+        except ImportError:
+            self.model = None
 
         # Rebuild FAISS index if needed
         if self.use_faiss and self.job_embeddings:

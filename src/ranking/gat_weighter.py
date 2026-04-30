@@ -149,23 +149,23 @@ class GATSkillWeighter:
 
         return history
 
-    def get_skill_weight(self, skill_name):
+    def get_skill_weight(self, skill_id):
         """
         Get the GAT-computed importance weight for a specific skill.
         Used in ranking layer's skill coverage calculation.
 
         Args:
-            skill_name: skill string (e.g., "Python", "Machine Learning")
+            skill_id: skill identifier string (e.g., "python", "pytorch")
 
         Returns:
             float: importance score in [0, 1], or 0.0 if skill not in KG
         """
-        if self.skill_scores is None or skill_name not in self.skill_id_map:
-            logger.debug(f"[GATSkillWeighter] Skill '{skill_name}' not found in KG, weight=0.0")
+        if self.skill_scores is None or skill_id not in self.skill_id_map:
+            logger.debug(f"[GATSkillWeighter] Skill '{skill_id}' not found in KG, weight=0.0")
             return 0.0
 
-        skill_id = self.skill_id_map[skill_name]
-        return float(self.skill_scores[skill_id])
+        idx = self.skill_id_map[skill_id]
+        return float(self.skill_scores[idx])
 
     def get_top_k_skills(self, k=10):
         """
@@ -224,29 +224,3 @@ class GATSkillWeighter:
             "top_reasons": reasons
         }
 
-    @staticmethod
-    def integrate_with_ranking(gat_weights, base_ranking_scores, coverage_factor=0.1):
-        """
-        Integrate GAT skill weights into the overall ranking score.
-
-        Formula:
-            final_score = α · Sim_graph + β · Sim_semantic + γ · Σ GAT_weight(s) · I(s ∈ skills)
-                          where coverage_factor = γ
-
-        Args:
-            gat_weights: dict {skill_name: float} — GAT importance scores
-            base_ranking_scores: dict {job_id: float} — current linear rankings
-            coverage_factor: how much GAT scores influence final ranking (default 0.1)
-
-        Returns:
-            dict {job_id: float} — adjusted ranking scores
-        """
-        adjusted = {}
-        max_gat_score = max(gat_weights.values(), default=1.0) + 1e-8
-
-        for job_id, base_score in base_ranking_scores.items():
-            # Parse job skills from job_id or metadata would be needed here
-            # For now, the caller integrates gat_weights at the SkillCoverageCalculator level
-            adjusted[job_id] = base_score  # Placeholder — actual integration in ranking layer
-
-        return adjusted

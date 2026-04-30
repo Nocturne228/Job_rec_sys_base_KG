@@ -159,7 +159,7 @@ def setup_skill_coverage_calculator(data):
     print("=" * 60)
 
     # --- Build mock KG data from the demo's skills/jobs ---
-    skills_list = [{"name": s.name, "level": 1, "domain": s.category} for s in data.skills]
+    skills_list = [{"name": s.id, "display_name": s.name, "level": 1, "domain": s.category} for s in data.skills]
 
     prereqs = _generate_prerequisites()
     job_associations = _build_job_associations(data.jobs)
@@ -198,34 +198,34 @@ def setup_skill_coverage_calculator(data):
 # Manually defined prerequisite relations (realistic tech skill prerequisites)
 _PREREQUISITE_EDGES = [
     # Programming → Framework
-    ("Python", "PyTorch", 0.9),
-    ("Python", "TensorFlow", 0.8),
-    ("Python", "Pandas", 0.8),
-    ("Python", "NumPy", 0.9),
-    ("JavaScript", "React", 0.9),
-    ("JavaScript", "Vue.js", 0.9),
-    ("JavaScript", "Node.js", 0.9),
+    ("python", "pytorch", 0.9),
+    ("python", "tensorflow", 0.8),
+    ("python", "pandas", 0.8),
+    ("python", "numpy", 0.9),
+    ("javascript", "react", 0.9),
+    ("javascript", "vue", 0.9),
+    ("javascript", "nodejs", 0.9),
     # Backend → DevOps
-    ("Docker", "Kubernetes", 0.9),
-    ("Python", "Docker", 0.3),
-    ("Node.js", "Docker", 0.3),
+    ("docker", "kubernetes", 0.9),
+    ("python", "docker", 0.3),
+    ("nodejs", "docker", 0.3),
     # Cloud prerequisites
-    ("Docker", "AWS", 0.5),
-    ("Docker", "Azure", 0.5),
-    ("Docker", "Google Cloud", 0.5),
+    ("docker", "aws", 0.5),
+    ("docker", "azure", 0.5),
+    ("docker", "gcp", 0.5),
     # Database prerequisites
-    ("SQL", "PostgreSQL", 0.8),
-    ("SQL", "MongoDB", 0.3),
+    ("sql", "postgresql", 0.8),
+    ("sql", "mongodb", 0.3),
     # ML prerequisites
-    ("NumPy", "PyTorch", 0.6),
-    ("NumPy", "TensorFlow", 0.6),
-    ("Pandas", "PyTorch", 0.3),
-    ("Scikit-learn", "PyTorch", 0.7),
-    ("Scikit-learn", "TensorFlow", 0.6),
+    ("numpy", "pytorch", 0.6),
+    ("numpy", "tensorflow", 0.6),
+    ("pandas", "pytorch", 0.3),
+    ("scikit", "pytorch", 0.7),
+    ("scikit", "tensorflow", 0.6),
     # Soft skills (no prerequisites, just connected loosely)
-    ("Communication", "Leadership", 0.3),
-    ("Problem Solving", "Python", 0.2),
-    ("Problem Solving", "Java", 0.2),
+    ("communication", "leadership", 0.3),
+    ("problem_solving", "python", 0.2),
+    ("problem_solving", "java", 0.2),
 ]
 
 
@@ -314,19 +314,15 @@ def demonstrate_recall_pipeline(data, lightgcn_model, data_loader, sbert_recall)
     return ensemble
 
 
-def demonstrate_ranking_pipeline(data, ensemble_recall, skill_calculator, gat_weighter=None):
+def demonstrate_ranking_pipeline(data, ensemble_recall, skill_calculator,
+                                 data_loader, lightgcn_model, sbert_recall,
+                                 gat_weighter=None):
     """演示排序管线的运行流程。
 
     使用 LinearFusionRanker 将多路召回信号（图相似度、语义相似度、技能覆盖率）
-    线性组合为最终排序分数。
+    线性组合为最终排序分数。LightGCN 和 SBERT 分数来自真实模型输出。
 
     如果提供了 GATSkillWeighter，则会对比 均匀权重 vs GAT 加权 覆盖率。
-
-    Args:
-        data: GraphEntities 对象
-        ensemble_recall: 融合召回实例
-        skill_calculator: 技能覆盖率计算器 (已注入 GAT)
-        gat_weighter: GATSkillWeighter 实例（可选）
 
     Returns:
         LinearFusionRanker: 配置完成的线性融合排序实例
@@ -377,24 +373,57 @@ def demonstrate_ranking_pipeline(data, ensemble_recall, skill_calculator, gat_we
     print(f"  {'Job Title':<30} {'Uniform':>8} {'GAT':>8} {'Delta':>8}")
     print(f"  {'─' * 30} {'─' * 8} {'─' * 8} {'─' * 8}")
 
-    ranking_inputs = []
+    # Compute real LightGCN embeddings and scores for the sample user
+    import torch
+    adj_matrix = data_loader.get_sparse_graph()
+    coo = adj_matrix.tocoo()
+    adj_tensor = torch.sparse_coo_tensor(
+        torch.tensor([coo.row, coo.col], dtype=torch.long),
+        torch.tensor(coo.data, dtype=torch.float), coo.shape
+    ).coalesce()
+    lightgcn_model.eval()
+    with torch.no_grad():
+        user_emb, item_emb = lightgcn_model(adj_tensor)
+
+    user_idx = data_loader.user_id_to_idx.get(sample_user.id)
+    if user_idx is not None:
+        user_vec = user_emb[user_idx]
+        # Compute LightGCN scores for all test jobs via dot product
+        test_job_indices = [data_loader.job_id_to_idx.get(j.id) for j in test_jobs]
+        lg_scores_raw = torch.matmul(user_vec, item_emb[test_job_indices].T).tolist()
+        lg_min, lg_max = min(lg_scores_raw), max(lg_scores_raw)
+        lg_range = lg_max - lg_min if lg_max > lg_min else 1.0
+    else:
+        lg_scores_raw = [0.5] * len(test_jobs)
+        lg_min, lg_max, lg_range = 0.0, 1.0, 1.0
+
+    # SBERT scores from real semantic model
+    sb_scores_raw = []
     for job in test_jobs:
+        sb_recs = sbert_recall.recommend_for_user(sample_user.id, k=1)
+        if sb_recs:
+            sb_scores_raw.append(sb_recs[0][1] if sb_recs[0][0] == job.id else 0.5)
+        else:
+            sb_scores_raw.append(0.5)
+    sb_min, sb_max = min(sb_scores_raw), max(sb_scores_raw)
+    sb_range = sb_max - sb_min if sb_max > sb_min else 1.0
+
+    ranking_inputs = []
+    for i, job in enumerate(test_jobs):
         jr = {sk: lv for sk, lv in job.required_skills.items()}
         jp = {sk: lv for sk, lv in job.preferred_skills.items()}
         result = skill_calculator.calculate_coverage(user_skills, jr, jp)
 
-        # Simulate LightGCN + SBERT scores (in production: from EnsembleRecall)
-        lg_score = 0.85 - hash(job.id) % 30 / 100.0  # ~0.55-0.85
-        sb_score = 0.70 - hash(job.id) % 25 / 100.0  # ~0.45-0.70
+        # Real LightGCN and SBERT scores, normalized to [0, 1]
+        lg_score = (lg_scores_raw[i] - lg_min) / lg_range
+        sb_score = (sb_scores_raw[i] - sb_min) / sb_range
 
         u_cov = result['coverage_score']
-        g_cov = result.get('gat_coverage_score') or u_cov  # fallback to uniform
+        g_cov = result.get('gat_coverage_score')
+        rank_cov = g_cov if g_cov is not None else u_cov
 
-        delta = g_cov - u_cov
-        print(f"  {job.title:<30} {u_cov:8.2%} {g_cov:8.2%} {delta:>+8.2%}")
-
-        # Use GAT coverage if available for ranking
-        rank_cov = g_cov if g_cov is not None and g_cov != u_cov else u_cov
+        delta = (g_cov - u_cov) if g_cov is not None else 0.0
+        print(f"  {job.title:<30} {u_cov:8.2%} {g_cov or 0:8.2%} {delta:>+8.2%}")
 
         ranking_inputs.append(RankingFeatures(
             lightgcn_score=lg_score,
@@ -514,7 +543,9 @@ def run_complete_demo():
     ensemble_recall = demonstrate_recall_pipeline(data, lightgcn_model, data_loader, sbert_recall)
 
     # 第 6 步：演示排序管线（含 GAT 加权覆盖率对比）
-    ranker = demonstrate_ranking_pipeline(data, ensemble_recall, skill_calculator, gat_weighter)
+    ranker = demonstrate_ranking_pipeline(data, ensemble_recall, skill_calculator,
+                                          data_loader, lightgcn_model, sbert_recall,
+                                          gat_weighter)
 
     # 第 7 步：演示生成管线
     workflow = demonstrate_generation_pipeline(data)

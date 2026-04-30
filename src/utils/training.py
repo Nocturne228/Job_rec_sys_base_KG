@@ -245,9 +245,9 @@ def evaluate_model(model: LightGCN,
                 if user_gt.dim() == 0:
                     user_gt = user_gt.unsqueeze(0)
 
-                # Recall@k
+                # Recall@k: standard definition hits / |Test(u)|
                 hits = torch.isin(user_topk, user_gt).sum().item()
-                recall = hits / min(k, len(user_gt)) if len(user_gt) > 0 else 0.0
+                recall = hits / len(user_gt) if len(user_gt) > 0 else 0.0
                 recall_sum += recall
 
                 # NDCG@k

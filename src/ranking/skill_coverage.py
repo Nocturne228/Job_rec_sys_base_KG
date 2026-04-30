@@ -73,12 +73,13 @@ class SkillCoverageCalculator:
             coverage_score = (required_weight * required_metrics['coverage_ratio'] +
                             preferred_weight * preferred_metrics['coverage_ratio'])
 
-        # GAT-weighted coverage (production mode)
+        # GAT-weighted coverage: use same required+preferred pool as uniform
+        # so uniform vs GAT comparison is on the same skill set
         gat_coverage: Optional[float] = None
         if self.gat_weighter is not None:
-            gat_coverage = self._gat_weighted_coverage(
-                user_skills, job_required_skills
-            )
+            all_required = dict(job_required_skills)
+            all_required.update(job_preferred_skills)
+            gat_coverage = self._gat_weighted_coverage(user_skills, all_required)
 
         skill_gap = self._calculate_skill_gap(user_skills, job_required_skills)
 
@@ -104,19 +105,18 @@ class SkillCoverageCalculator:
         Coverage_GAT = sum(weights of matched skills) /
                        sum(weights of all required skills)
 
-        Replaces uniform weights so that missing a core professional skill
-        (e.g., Spring Boot) penalizes coverage more than missing a generic
-        skill (e.g., Git). Only meaningful on production-scale KG
-        (~2,500 skill nodes with 5,000+ prerequisite edges).
+        Uses GAT-learned per-skill importance weights so that missing a core
+        professional skill (e.g., Spring Boot) penalizes coverage more than
+        missing a generic skill (e.g., Git).
         """
-        user_skill_names = set(user_skills.keys())
+        user_skill_ids = set(user_skills.keys())
         matched_weights = []
         total_weights = []
 
-        for skill_name in job_required_skills:
-            weight = self.gat_weighter.get_skill_weight(skill_name)
+        for skill_id in job_required_skills:
+            weight = self.gat_weighter.get_skill_weight(skill_id)
             total_weights.append(weight)
-            if skill_name in user_skill_names:
+            if skill_id in user_skill_ids:
                 matched_weights.append(weight)
 
         total = sum(total_weights)

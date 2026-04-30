@@ -1,19 +1,30 @@
-/desktop.ini
-/nlp/User Portrait/Text Vectorization/doc2vec/data/zhwiki-latest-pages-articles.xml.bz2
-/nlp/User Portrait/Text Vectorization/word2vec/data/zhwiki-latest-pages-articles.xml.bz2
-/.venv/
-/nlp/model/models/
-**/.idea
-/nlp/Train/
-**/__pycache__
-nlp/dataset/img3.png
-*.npy
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
 *.pkl
-nlp/dataset/company_loc_triple.csv
-nlp/dataset/data_all.csv
-nlp/dataset/img4.png
-nlp/dataset/process/hanlp_tokens/tokens.csv
-nlp/dataset/process/hanlp_tokens/tokens_after_hanlp.csv
-nlp/extractor/output.csv
-nlp/User Portrait/Text Vectorization/doc2vec/documents.pkl
-nlp/User Portrait/Text Vectorization/word2vec/data/reduce_zhiwiki.txt
+*.pt
+*.pth
+
+# Environment
+.env
+.env.local
