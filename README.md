@@ -207,19 +207,40 @@ Step 4: Generate       — Qwen-2.5 (t=0.3, max_tokens=1000) → JSON 输出
 
 ## 5. 指标体系
 
-### 5.1 离线评估
+### 5.1 赛题核心指标: 推荐有效性 (QR-1)
 
-| 指标 | 公式 | 目标 (K=10) |
-|------|------|-------------|
-| Recall@K | `\|Rec(u) ∩ Test(u)\| / \|Test(u)\|` | ≥ 0.25 |
-| NDCG@K | `DCG@K / IDCG@K` | ≥ 0.28 |
-| Precision@K | `\|Rec ∩ Test\| / K` | ≥ 0.15 |
-| HitRate@K | `∃ hit ∈ Top-K` | ≥ 0.45 |
-| MRR | `1 / rank_first_hit` | ≥ 0.20 |
+**定义**（赛题原文: "推荐有效性达到 80% 以上，用户调查：电子或计算机类相关专业毕业生简历与岗位样例库进行匹配"）:
 
-共 7 项（含 Coverage@K、AUC），实现在 `src/utils/training.py:evaluate_model()`。
+```
+推荐有效性 = N_satisfied / N_total
 
-### 5.2 模型对比
+N_satisfied = 用户标记为"有效/满意"的推荐总数
+N_total     = 用户收到的推荐总数
+目标: ≥ 80%
+```
+
+**采集方式**:
+| 方式 | 实现 | 位置 |
+|------|------|------|
+| 在线反馈 | `POST /api/feedback` — 每次推荐用户标记满意/不满意 | `src/api/routes.py` |
+| 离线模拟 | 从交互数据推断 — apply/save→满意, click→50%, view→不满意 | `src/metrics/effectiveness.py:simulate_effectiveness_from_interactions()` |
+| 统计报告 | `GET /api/effectiveness` — 全局 + 分用户有效性 | `src/metrics/effectiveness.py:EffectivenessCollector.report()` |
+
+### 5.2 离线评估（模型质量）
+
+| 指标 | 公式 | 目标 (K=10) | 实现 |
+|------|------|-------------|------|
+| Recall@K | `\|Rec(u) ∩ Test(u)\| / \|Test(u)\|` | ≥ 0.25 | `training.py` |
+| NDCG@K | `DCG@K / IDCG@K` | ≥ 0.28 | `training.py` |
+| Precision@K | `\|Rec ∩ Test\| / K` | ≥ 0.15 | `training.py` |
+| HitRate@K | `∃ hit ∈ Top-K` | ≥ 0.45 | `training.py` |
+| MRR | `1 / rank_first_hit` | ≥ 0.20 | `training.py` |
+| Coverage@K | `\|∪Rec(u)\| / \|Items\||` | ≥ 0.10 | `training.py` |
+| AUC | `Σ I(ŷ_ui > ŷ_uj) / (N_pos × N_neg)` | ≥ 0.60 | `training.py` |
+
+共 7 项，实现在 `src/utils/training.py:evaluate_model()`。
+
+### 5.3 模型对比
 
 | 模型 | Recall@10 | NDCG@10 | HitRate@10 |
 |------|-----------|---------|------------|
@@ -228,7 +249,27 @@ Step 4: Generate       — Qwen-2.5 (t=0.3, max_tokens=1000) → JSON 输出
 | Ensemble (α=0.7) | 0.27 | 0.31 | 0.52 |
 | + GAT 加权覆盖率 | 0.29 | 0.33 | 0.55 |
 
-### 5.3 离线 → 线上映射
+### 5.4 在线行为指标
+
+| 指标 | 公式 | 目标 | 实现 |
+|------|------|------|------|
+| CTR | clicks / impressions | 5-8% | `online_metrics.py` |
+| CVR | applies / clicks | 1.5-2.5% | `online_metrics.py` |
+| North Star CVR | applies / impressions | 北极星指标 | `online_metrics.py` |
+
+### 5.5 工程性能指标
+
+| 指标 | 目标 | 实现 |
+|------|------|------|
+| 召回延迟 (P99) | < 30ms | `src/recall/` |
+| 排序延迟 (P99) | < 3ms | `src/ranking/` |
+| 生成延迟 (P99) | < 5s | `src/generation/` |
+| 整体推荐响应 | < 5s（赛题 QR-6） | `src/api/routes.py` |
+| 并发支持 | ≥ 1000（赛题 QR-5） | FastAPI + uvicorn async |
+| 推荐有效性 | ≥ 80%（赛题 QR-1） | `src/metrics/effectiveness.py` |
+| 隐私加密覆盖 | ≥ 4 项（赛题 QR-3） | `src/utils/crypto.py` |
+
+### 5.6 离线 → 线上映射
 
 ```
 Recall@10 = 0.27 (离线)
@@ -354,20 +395,30 @@ jobrec/
 ├── logs/           (README)           # 日志文件 — 训练/推理/错误日志
 ├── src/
 │   ├── config/settings.py            # 全局配置 (Pydantic)
-│   ├── data/                         # 数据模型 + Mock 生成 + DataLoader
+│   ├── data/                         # 数据模型 + Mock 生成 + DataLoader + 脱敏
 │   ├── recall/                       # LightGCN + SBERT + Ensemble
 │   ├── ranking/                      # LinearFusion + SkillCoverage + GATWeighter
 │   ├── models/gat.py                # GAT 模型 (GATLayer, MultiHeadGATLayer, SkillFeatureBuilder)
 │   ├── generation/                   # LangGraph 工作流 + LLM 模拟器
 │   ├── metrics/                      # A/B Testing + 在线指标 + LLM 评估
-│   └── utils/training.py            # 训练管线 + 7 项离线评估
+│   ├── matching/                     # 反向匹配 — 企业端候选人搜索 (FR-7)
+│   ├── analytics/                    # 趋势分析 — 热门职位/技能/学历 (FR-8)
+│   ├── api/                          # FastAPI 交互层 — 推荐/胜任度/反馈 (FR-4/5/6/7)
+│   └── utils/                        # 训练管线 + 7 项离线评估 + 隐私加密
 ├── docs/
+│   ├── 00-项目讲解文档.md             # 面试答辩完整底稿（总→分→总，覆盖全部赛题需求）
 │   ├── 01-软件工程设计文档.md         # SE 全生命周期 + 参数依据 + 面试 Q&A
 │   ├── 02-数据需求规格.md             # 6 类数据需求规格
-│   └── 03-面试知识清单.md             # 推荐系统面试知识速查清单
+│   ├── 03-面试知识清单.md             # 推荐系统面试知识速查清单
+│   ├── 04-赛题需求规格.md             # 服创大赛 A15 赛题需求 + 契合度评估
+│   └── 05-改动记录.md                 # 赛题合规改造记录
 └── ref/
+    ├── 赛题.pdf                       # 服创大赛 A15 赛题原稿
+    ├── papers/                        # 20 篇求职推荐领域论文
     ├── 01-参考文献总览.md              # 41 篇文献 + 前沿升级 + 业界调研
-    └── 02-文献应用映射报告.md          # 每个模块→文献的具体映射
+    ├── 02-文献应用映射报告.md          # 每个模块→文献的具体映射
+    ├── 03-文献综合分析.md              # 完整技术论述 + 求职领域对比 + 可应用改进
+    └── 04-论文索引.md                  # 20 篇论文逐篇技术总结 + 模块映射
 ```
 
 ## 参考文献
