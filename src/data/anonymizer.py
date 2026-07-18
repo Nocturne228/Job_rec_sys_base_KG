@@ -2,6 +2,7 @@
 Data anonymization: replaces personal identifiers with pseudonyms before storage.
 References: GDPR data-minimization principle, competition QR-3 requirement.
 """
+
 import hashlib
 import re
 
@@ -27,7 +28,7 @@ def pseudonymize(user_id: str, salt: str = "jobrec") -> str:
 
 
 def anonymize_resume(resume_text: str) -> str:
-    text = re.sub(r'\b[\w.-]+@[\w.-]+\.\w+\b', '[EMAIL]', resume_text)
-    text = re.sub(r'\b1[3-9]\d{9}\b', '[PHONE]', text)
-    text = re.sub(r'\b\d{17}[\dXx]\b', '[ID_NUMBER]', text)
+    text = re.sub(r"\b[\w.-]+@[\w.-]+\.\w+\b", "[EMAIL]", resume_text)
+    text = re.sub(r"\b1[3-9]\d{9}\b", "[PHONE]", text)
+    text = re.sub(r"\b\d{17}[\dXx]\b", "[ID_NUMBER]", text)
     return text

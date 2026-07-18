@@ -21,9 +21,17 @@ env/
 Thumbs.db
 
 # Project specific
+.coverage
+.coverage.*
 *.pkl
 *.pt
 *.pth
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+
+# Local logs and generated report intermediates
+*.log
 
 # Environment
 .env

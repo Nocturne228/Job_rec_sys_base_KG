@@ -5,9 +5,11 @@ These weights are incorporated into the skill coverage feature for explainable r
 """
 
 import logging
+
 import numpy as np
 import torch
-from models.gat import GraphAttentionNetwork, SkillFeatureBuilder
+
+from src.models.gat import GraphAttentionNetwork, SkillFeatureBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +29,15 @@ class GATSkillWeighter:
         skill_coverage_score = Σ_{s ∈ missing_skills} GAT_weight(s) × priority(s)
     """
 
-    def __init__(self, kg_data=None, hidden_dim=32, num_heads=4, num_features=16,
-                 edge_attr_dim=1, dropout=0.6):
+    def __init__(
+        self,
+        kg_data=None,
+        hidden_dim=32,
+        num_heads=4,
+        num_features=16,
+        edge_attr_dim=1,
+        dropout=0.6,
+    ):
         self.kg_data = kg_data
         self.num_features = num_features
         self.hidden_dim = hidden_dim
@@ -38,8 +47,8 @@ class GATSkillWeighter:
 
         self.model = None
         self.skill_id_map = None
-        self.skill_scores = None      # [num_skills] numpy array
-        self.skill_names_by_id = {}   # reverse mapping
+        self.skill_scores = None  # [num_skills] numpy array
+        self.skill_names_by_id = {}  # reverse mapping
 
         # Feature cache for training
         self._x = None
@@ -67,19 +76,22 @@ class GATSkillWeighter:
             num_skill_features=self.num_features,
             hidden_dim=self.hidden_dim,
             num_heads=self.num_heads,
-            edge_attr_dim=self._edge_attr.shape[1] if self._edge_attr.numel() > 0 else 1,
-            dropout=self.dropout
+            edge_attr_dim=(
+                self._edge_attr.shape[1] if self._edge_attr.numel() > 0 else 1
+            ),
+            dropout=self.dropout,
         )
 
         # Default: run inference with untrained weights to cache initial scores
         self.model.eval()
         with torch.no_grad():
-            self.skill_scores = (
-                self.model.compute_node_importance(self._x, self._edge_index, self._edge_attr).numpy()
-            )
+            self.skill_scores = self.model.compute_node_importance(
+                self._x, self._edge_index, self._edge_attr
+            ).numpy()
 
-    def train(self, n_epochs=200, lr=1e-3, weight_decay=1e-4,
-              device="cpu", verbose=True):
+    def train(
+        self, n_epochs=200, lr=1e-3, weight_decay=1e-4, device="cpu", verbose=True
+    ):
         """
         Train GAT with pseudo-labels constructed from PageRank + job frequency.
 
@@ -134,13 +146,15 @@ class GATSkillWeighter:
             verbose=verbose,
         )
 
-        logger.info(f"[GATSkillWeighter] GAT training complete. Best loss={min(history['loss']):.4f}")
+        logger.info(
+            f"[GATSkillWeighter] GAT training complete. Best loss={min(history['loss']):.4f}"
+        )
 
         # --- Cache scores ---
         with torch.no_grad():
-            self.skill_scores = (
-                self.model.compute_node_importance(self._x, self._edge_index, self._edge_attr).numpy()
-            )
+            self.skill_scores = self.model.compute_node_importance(
+                self._x, self._edge_index, self._edge_attr
+            ).numpy()
 
         logger.info(
             f"[GATSkillWeighter] Computed importance scores for {len(self.skill_scores)} skills. "
@@ -161,7 +175,9 @@ class GATSkillWeighter:
             float: importance score in [0, 1], or 0.0 if skill not in KG
         """
         if self.skill_scores is None or skill_id not in self.skill_id_map:
-            logger.debug(f"[GATSkillWeighter] Skill '{skill_id}' not found in KG, weight=0.0")
+            logger.debug(
+                f"[GATSkillWeighter] Skill '{skill_id}' not found in KG, weight=0.0"
+            )
             return 0.0
 
         idx = self.skill_id_map[skill_id]
@@ -179,7 +195,10 @@ class GATSkillWeighter:
 
         # Get indices sorted by score
         top_ids = np.argsort(self.skill_scores)[::-1][:k]
-        return [(self.skill_names_by_id[idx], float(self.skill_scores[idx])) for idx in top_ids]
+        return [
+            (self.skill_names_by_id[idx], float(self.skill_scores[idx]))
+            for idx in top_ids
+        ]
 
     def get_explainability_report(self, skill_name):
         """
@@ -194,7 +213,11 @@ class GATSkillWeighter:
             }
         """
         if skill_name not in self.skill_id_map:
-            return {"skill": skill_name, "importance_score": 0.0, "error": "Skill not in KG"}
+            return {
+                "skill": skill_name,
+                "importance_score": 0.0,
+                "error": "Skill not in KG",
+            }
 
         skill_id = self.skill_id_map[skill_name]
         score = float(self.skill_scores[skill_id])
@@ -202,25 +225,33 @@ class GATSkillWeighter:
 
         # Generate human-readable reasons
         top_skills = self.get_top_k_skills(k=5)
-        rank = next((i + 1 for i, (sn, _) in enumerate(top_skills) if sn == skill_name), "unranked")
+        rank = next(
+            (i + 1 for i, (sn, _) in enumerate(top_skills) if sn == skill_name),
+            "unranked",
+        )
 
         reasons = []
         if percentile >= 0.9:
-            reasons.append(f"{skill_name} is in the top 10% most impactful skills across all jobs")
+            reasons.append(
+                f"{skill_name} is in the top 10% most impactful skills across all jobs"
+            )
         elif percentile >= 0.7:
-            reasons.append(f"{skill_name} is a highly referenced skill in the skill prerequisite graph")
+            reasons.append(
+                f"{skill_name} is a highly referenced skill in the skill prerequisite graph"
+            )
 
         if rank <= 5 and isinstance(rank, int):
             reasons.append(f"Ranked #{rank} overall in skill importance")
 
         if not reasons:
-            reasons.append(f"{skill_name} contributes moderately to career path decisions")
+            reasons.append(
+                f"{skill_name} contributes moderately to career path decisions"
+            )
 
         return {
             "skill": skill_name,
             "importance_score": round(score, 4),
             "percentile": round(percentile, 2),
             "rank": rank,
-            "top_reasons": reasons
+            "top_reasons": reasons,
         }
-

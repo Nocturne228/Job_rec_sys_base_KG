@@ -1,9 +1,11 @@
 """
 Ensemble recall that combines LightGCN and SBERT recall results.
 """
-import numpy as np
-from typing import List, Dict, Tuple, Optional, Any
+
 from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
 
 from .lightgcn import LightGCN
 from .sbert_recall import SBERTRecall
@@ -12,6 +14,7 @@ from .sbert_recall import SBERTRecall
 @dataclass
 class RecallResult:
     """Container for recall results."""
+
     job_id: str
     lightgcn_score: float = 0.0
     sbert_score: float = 0.0
@@ -22,12 +25,14 @@ class RecallResult:
 class EnsembleRecall:
     """Ensemble recall combining LightGCN and SBERT."""
 
-    def __init__(self,
-                 lightgcn_model: LightGCN,
-                 sbert_recall: SBERTRecall,
-                 lightgcn_weight: float = 0.7,
-                 sbert_weight: float = 0.3,
-                 fusion_method: str = "weighted_sum"):
+    def __init__(
+        self,
+        lightgcn_model: LightGCN,
+        sbert_recall: SBERTRecall,
+        lightgcn_weight: float = 0.7,
+        sbert_weight: float = 0.3,
+        fusion_method: str = "weighted_sum",
+    ):
         """
         Initialize ensemble recall.
 
@@ -51,16 +56,18 @@ class EnsembleRecall:
             self.lightgcn_weight = lightgcn_weight / total_weight
             self.sbert_weight = sbert_weight / total_weight
 
-    def recommend_for_user(self,
-                          user_id: str,
-                          user_idx: Optional[int] = None,
-                          user_embeddings: Optional[np.ndarray] = None,
-                          item_embeddings: Optional[np.ndarray] = None,
-                          k: int = 10,
-                          exclude_interacted: bool = True,
-                          interacted_items: Optional[List[str]] = None,
-                          item_idx_to_job_id: Optional[Dict[int, str]] = None,
-                          job_id_to_item_idx: Optional[Dict[str, int]] = None) -> List[RecallResult]:
+    def recommend_for_user(
+        self,
+        user_id: str,
+        user_idx: Optional[int] = None,
+        user_embeddings: Optional[np.ndarray] = None,
+        item_embeddings: Optional[np.ndarray] = None,
+        k: int = 10,
+        exclude_interacted: bool = True,
+        interacted_items: Optional[List[str]] = None,
+        item_idx_to_job_id: Optional[Dict[int, str]] = None,
+        job_id_to_item_idx: Optional[Dict[str, int]] = None,
+    ) -> List[RecallResult]:
         """
         Generate ensemble recommendations for a user.
 
@@ -80,7 +87,11 @@ class EnsembleRecall:
         """
         # Get LightGCN recommendations if user_idx is provided
         lightgcn_recommendations = []
-        if user_idx is not None and user_embeddings is not None and item_embeddings is not None:
+        if (
+            user_idx is not None
+            and user_embeddings is not None
+            and item_embeddings is not None
+        ):
             # Convert interacted job IDs to indices if a mapping is provided
             interacted_indices = None
             if exclude_interacted and interacted_items:
@@ -90,7 +101,9 @@ class EnsembleRecall:
                     interacted_indices = [
                         v for v in interacted_items.values() if isinstance(v, int)
                     ]
-                elif isinstance(interacted_items, list) and all(isinstance(x, int) for x in interacted_items):
+                elif isinstance(interacted_items, list) and all(
+                    isinstance(x, int) for x in interacted_items
+                ):
                     interacted_indices = interacted_items
                 elif (
                     isinstance(interacted_items, list)
@@ -109,11 +122,15 @@ class EnsembleRecall:
                 item_embeddings=item_embeddings,
                 k=k * 2,  # Get more candidates for fusion
                 exclude_interacted=exclude_interacted,
-                interacted_items=interacted_indices
+                interacted_items=interacted_indices,
             )
             lightgcn_recommendations = [
                 (
-                    item_idx_to_job_id[item_idx] if item_idx_to_job_id and item_idx in item_idx_to_job_id else str(item_idx),
+                    (
+                        item_idx_to_job_id[item_idx]
+                        if item_idx_to_job_id and item_idx in item_idx_to_job_id
+                        else str(item_idx)
+                    ),
                     float(score),
                 )
                 for item_idx, score in zip(item_indices, lg_scores)
@@ -124,17 +141,17 @@ class EnsembleRecall:
 
         # Combine recommendations
         combined = self._fuse_recommendations(
-            lightgcn_recommendations,
-            sbert_recommendations,
-            k=k
+            lightgcn_recommendations, sbert_recommendations, k=k
         )
 
         return combined
 
-    def _fuse_recommendations(self,
-                             lightgcn_recs: List[Tuple[str, float]],
-                             sbert_recs: List[Tuple[str, float]],
-                             k: int = 10) -> List[RecallResult]:
+    def _fuse_recommendations(
+        self,
+        lightgcn_recs: List[Tuple[str, float]],
+        sbert_recs: List[Tuple[str, float]],
+        k: int = 10,
+    ) -> List[RecallResult]:
         """
         Fuse recommendations from LightGCN and SBERT.
 
@@ -173,9 +190,13 @@ class EnsembleRecall:
             sb_score = sb_norm.get(job_id, 0.0)
 
             if self.fusion_method == "weighted_sum":
-                combined = self.lightgcn_weight * lg_score + self.sbert_weight * sb_score
+                combined = (
+                    self.lightgcn_weight * lg_score + self.sbert_weight * sb_score
+                )
             elif self.fusion_method == "product":
-                combined = (lg_score ** self.lightgcn_weight) * (sb_score ** self.sbert_weight)
+                combined = (lg_score**self.lightgcn_weight) * (
+                    sb_score**self.sbert_weight
+                )
             elif self.fusion_method == "rank_combination":
                 # Get ranks (lower rank is better)
                 lg_rank = self._get_rank(job_id, lightgcn_recs)
@@ -185,14 +206,19 @@ class EnsembleRecall:
                 lg_rank_score = 1.0 / (lg_rank + 1) if lg_rank is not None else 0.0
                 sb_rank_score = 1.0 / (sb_rank + 1) if sb_rank is not None else 0.0
 
-                combined = self.lightgcn_weight * lg_rank_score + self.sbert_weight * sb_rank_score
+                combined = (
+                    self.lightgcn_weight * lg_rank_score
+                    + self.sbert_weight * sb_rank_score
+                )
             else:
                 raise ValueError(f"Unknown fusion method: {self.fusion_method}")
 
             combined_scores[job_id] = combined
 
         # Sort by combined score
-        sorted_jobs = sorted(combined_scores.items(), key=lambda x: x[1], reverse=True)[:k]
+        sorted_jobs = sorted(combined_scores.items(), key=lambda x: x[1], reverse=True)[
+            :k
+        ]
 
         # Create RecallResult objects
         results = []
@@ -202,28 +228,32 @@ class EnsembleRecall:
                 lightgcn_score=lg_scores.get(job_id, 0.0),
                 sbert_score=sb_scores.get(job_id, 0.0),
                 combined_score=combined_score,
-                rank=rank
+                rank=rank,
             )
             results.append(result)
 
         return results
 
-    def _get_rank(self, job_id: str, recommendations: List[Tuple[str, float]]) -> Optional[int]:
+    def _get_rank(
+        self, job_id: str, recommendations: List[Tuple[str, float]]
+    ) -> Optional[int]:
         """Get rank of a job in recommendations list (0-indexed)."""
         for rank, (jid, _) in enumerate(recommendations):
             if jid == job_id:
                 return rank
         return None
 
-    def evaluate_ensemble(self,
-                         user_ids: List[str],
-                         true_positives: Dict[str, List[str]],
-                         k_values: List[int] = [5, 10, 20],
-                         user_embeddings=None,
-                         item_embeddings=None,
-                         item_idx_to_job_id=None,
-                         job_id_to_item_idx=None,
-                         user_id_to_idx=None) -> Dict[str, Dict[int, float]]:
+    def evaluate_ensemble(
+        self,
+        user_ids: List[str],
+        true_positives: Dict[str, List[str]],
+        k_values: List[int] = [5, 10, 20],
+        user_embeddings=None,
+        item_embeddings=None,
+        item_idx_to_job_id=None,
+        job_id_to_item_idx=None,
+        user_id_to_idx=None,
+    ) -> Dict[str, Dict[int, float]]:
         """
         Evaluate ensemble recall performance.
 
@@ -243,10 +273,10 @@ class EnsembleRecall:
         metrics = {k: {"recall": 0.0, "precision": 0.0} for k in k_values}
 
         for user_id in user_ids:
-            user_idx = (user_id_to_idx.get(user_id)
-                       if user_id_to_idx else None)
+            user_idx = user_id_to_idx.get(user_id) if user_id_to_idx else None
             recommendations = self.recommend_for_user(
-                user_id, k=max(k_values),
+                user_id,
+                k=max(k_values),
                 user_idx=user_idx,
                 user_embeddings=user_embeddings,
                 item_embeddings=item_embeddings,
@@ -285,7 +315,7 @@ class EnsembleRecall:
             "lightgcn_weight": self.lightgcn_weight,
             "sbert_weight": self.sbert_weight,
             "fusion_method": self.fusion_method,
-            "total_weight": self.lightgcn_weight + self.sbert_weight
+            "total_weight": self.lightgcn_weight + self.sbert_weight,
         }
 
     def update_weights(self, lightgcn_weight: float, sbert_weight: float) -> None:

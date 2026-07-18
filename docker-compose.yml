@@ -1,0 +1,29 @@
+services:
+  api:
+    build: .
+    ports: ["8000:8000"]
+    environment:
+      JOBREC_BUNDLE_PATH: models/jobrec_bundle.json
+      JOBREC_EVENT_DB: /app/data/jobrec_events.sqlite3
+      JOBREC_TOKEN_SECRET: ${JOBREC_TOKEN_SECRET:-change-this-in-production}
+      JOBREC_DEMO_PASSWORD: ${JOBREC_DEMO_PASSWORD:-jobrec-demo}
+    volumes:
+      - jobrec-data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  neo4j:
+    image: neo4j:5-community
+    profiles: ["neo4j"]
+    ports: ["7474:7474", "7687:7687"]
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-jobrec-graph-password}
+    volumes:
+      - neo4j-data:/data
+
+volumes:
+  jobrec-data:
+  neo4j-data:

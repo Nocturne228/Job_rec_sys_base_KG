@@ -3,6 +3,7 @@ Enterprise-side reverse matching: given a job requirement, rank candidates.
 Uses the same underlying models (SBERT semantic + skill coverage + GAT weighting)
 in reverse direction for person-job fit scoring.
 """
+
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -51,17 +52,19 @@ class ReverseMatcher:
 
             sb_score = 0.5
             if self.sbert is not None:
-                sbr = self.sbert.recommend_for_user(uid, k=1)
-                if sbr:
-                    sb_score = sbr[0][1]
+                sb_score = self.sbert.compute_similarity(uid, job_id)
 
             final_score = 0.6 * coverage + 0.4 * sb_score
 
-            results.append(CandidateResult(
-                user_id=uid, score=round(final_score, 4),
-                matched_skills=matched, missing_skills=missing,
-                coverage_ratio=round(coverage, 4),
-            ))
+            results.append(
+                CandidateResult(
+                    user_id=uid,
+                    score=round(final_score, 4),
+                    matched_skills=matched,
+                    missing_skills=missing,
+                    coverage_ratio=round(coverage, 4),
+                )
+            )
 
         results.sort(key=lambda r: r.score, reverse=True)
         return results[:top_k]

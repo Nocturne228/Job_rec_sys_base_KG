@@ -2,8 +2,9 @@
 Hot trends analysis: popular jobs, skills, and education backgrounds.
 Implements competition requirement FR-8 (extended feature).
 """
+
 from collections import Counter
-from typing import Dict, List, Any
+from typing import Any, Dict, List
 
 
 class TrendAnalyzer:
@@ -18,8 +19,15 @@ class TrendAnalyzer:
         for inter in self.interactions:
             counter[inter.job_id] += 1
         return [
-            {"job_id": jid, "title": job_map.get(jid, type("J", (), {"title": "?"})()).title if jid in job_map else "?",
-             "count": cnt}
+            {
+                "job_id": jid,
+                "title": (
+                    job_map.get(jid, type("J", (), {"title": "?"})()).title
+                    if jid in job_map
+                    else "?"
+                ),
+                "count": cnt,
+            }
             for jid, cnt in counter.most_common(top_n)
         ]
 
@@ -30,7 +38,10 @@ class TrendAnalyzer:
                 counter[sid] += 1
             for sid in job.preferred_skills:
                 counter[sid] += 0.5
-        return [{"skill_id": sid, "frequency": round(cnt, 1)} for sid, cnt in counter.most_common(top_n)]
+        return [
+            {"skill_id": sid, "frequency": round(cnt, 1)}
+            for sid, cnt in counter.most_common(top_n)
+        ]
 
     def hot_skills_by_category(self) -> Dict[str, List[str]]:
         groups: Dict[str, list] = {}
@@ -39,7 +50,10 @@ class TrendAnalyzer:
                 groups.setdefault("required", []).append(sid)
             for sid in job.preferred_skills:
                 groups.setdefault("preferred", []).append(sid)
-        return {k: [f"{s}({c})" for s, c in Counter(v).most_common(10)] for k, v in groups.items()}
+        return {
+            k: [f"{s}({c})" for s, c in Counter(v).most_common(10)]
+            for k, v in groups.items()
+        }
 
     def education_distribution(self) -> Dict[str, int]:
         counter = Counter()
@@ -52,10 +66,14 @@ class TrendAnalyzer:
         buckets = {"0-1年": 0, "1-3年": 0, "3-5年": 0, "5年+": 0}
         for u in self.users:
             y = u.experience_years
-            if y <= 1: buckets["0-1年"] += 1
-            elif y <= 3: buckets["1-3年"] += 1
-            elif y <= 5: buckets["3-5年"] += 1
-            else: buckets["5年+"] += 1
+            if y <= 1:
+                buckets["0-1年"] += 1
+            elif y <= 3:
+                buckets["1-3年"] += 1
+            elif y <= 5:
+                buckets["3-5年"] += 1
+            else:
+                buckets["5年+"] += 1
         return buckets
 
     def full_report(self) -> Dict[str, Any]:

@@ -2,32 +2,42 @@
 LangGraph workflow for career advice generation.
 Based on the README: 4-node workflow with Graph Retrieval and LLM Generation.
 """
-from typing import Dict, List, Optional, Any, TypedDict, Annotated
+
 import json
-from datetime import datetime
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
+from typing import Annotated, Any, Dict, List, Optional, TypedDict
+
+from .adapters import fallback_advice, validate_advice
 
 # Try to import LangGraph, but provide fallback for demo/development
 try:
-    from langgraph.graph import StateGraph, END
+    from langgraph.graph import END, StateGraph
+
     LANGGRAPH_AVAILABLE = True
 except ImportError:
     LANGGRAPH_AVAILABLE = False
+
     # Minimal fallback: no real state machine, sequential execution
     class StateGraph:
         def __init__(self, state_schema=None):
             self._nodes = {}
             self._edges = []
             self._entry = None
+
         def add_node(self, name, fn):
             self._nodes[name] = fn
+
         def add_edge(self, src, dst):
             self._edges.append((src, dst))
+
         def set_entry_point(self, name):
             self._entry = name
+
         def compile(self):
             return self
+
         def invoke(self, initial_state):
             """Execute nodes sequentially following edge order."""
             state = initial_state
@@ -41,11 +51,13 @@ except ImportError:
                     state = self._nodes[current](state)
                 current = next_map.get(current)
             return state
+
     END = "END"
 
 
 class WorkflowStep(str, Enum):
     """Workflow step identifiers."""
+
     INIT = "init"
     GRAPH_RETRIEVAL = "graph_retrieval"
     PROMPT_CONSTRUCTION = "prompt_construction"
@@ -64,11 +76,17 @@ class WorkflowState:
     # Step outputs
     current_step: WorkflowStep = WorkflowStep.INIT
     user_skills: Dict[str, str] = field(default_factory=dict)  # skill_id -> level
-    job_required_skills: Dict[str, str] = field(default_factory=dict)  # skill_id -> min_level
-    job_preferred_skills: Dict[str, str] = field(default_factory=dict)  # skill_id -> min_level
+    job_required_skills: Dict[str, str] = field(
+        default_factory=dict
+    )  # skill_id -> min_level
+    job_preferred_skills: Dict[str, str] = field(
+        default_factory=dict
+    )  # skill_id -> min_level
 
     # Graph retrieval results
-    skill_gap: Dict[str, Dict[str, Optional[str]]] = field(default_factory=dict)  # skill_id -> {user_level, required_level}
+    skill_gap: Dict[str, Dict[str, Optional[str]]] = field(
+        default_factory=dict
+    )  # skill_id -> {user_level, required_level}
     shortest_paths: List[List[str]] = field(default_factory=list)  # List of skill paths
     skill_coverage: float = 0.0
 
@@ -112,12 +130,16 @@ class CareerAdvisorWorkflow:
         # Add nodes
         workflow.add_node(WorkflowStep.INIT, self._init_node)
         workflow.add_node(WorkflowStep.GRAPH_RETRIEVAL, self._graph_retrieval_node)
-        workflow.add_node(WorkflowStep.PROMPT_CONSTRUCTION, self._prompt_construction_node)
+        workflow.add_node(
+            WorkflowStep.PROMPT_CONSTRUCTION, self._prompt_construction_node
+        )
         workflow.add_node(WorkflowStep.LLM_GENERATION, self._llm_generation_node)
 
         # Add edges (sequential flow)
         workflow.add_edge(WorkflowStep.INIT, WorkflowStep.GRAPH_RETRIEVAL)
-        workflow.add_edge(WorkflowStep.GRAPH_RETRIEVAL, WorkflowStep.PROMPT_CONSTRUCTION)
+        workflow.add_edge(
+            WorkflowStep.GRAPH_RETRIEVAL, WorkflowStep.PROMPT_CONSTRUCTION
+        )
         workflow.add_edge(WorkflowStep.PROMPT_CONSTRUCTION, WorkflowStep.LLM_GENERATION)
         workflow.add_edge(WorkflowStep.LLM_GENERATION, END)
 
@@ -129,7 +151,9 @@ class CareerAdvisorWorkflow:
     def _init_node(self, state: WorkflowState) -> WorkflowState:
         """Initialize workflow state."""
         state.current_step = WorkflowStep.INIT
-        print(f"[{state.current_step}] Initializing workflow for user {state.user_id}, job {state.job_id}")
+        print(
+            f"[{state.current_step}] Initializing workflow for user {state.user_id}, job {state.job_id}"
+        )
         return state
 
     def _graph_retrieval_node(self, state: WorkflowState) -> WorkflowState:
@@ -148,10 +172,7 @@ class CareerAdvisorWorkflow:
             # Calculate skill gap
             skill_gap_raw = self.graph_loader.get_skill_gap(state.user_id, state.job_id)
             state.skill_gap = {
-                skill_id: {
-                    "user_level": user_level,
-                    "required_level": required_level
-                }
+                skill_id: {"user_level": user_level, "required_level": required_level}
                 for skill_id, (user_level, required_level) in skill_gap_raw.items()
             }
 
@@ -161,10 +182,14 @@ class CareerAdvisorWorkflow:
             )
 
             # Calculate skill coverage
-            coverage_result = self.graph_loader.get_recommended_learning_path(state.user_id, state.job_id)
+            coverage_result = self.graph_loader.get_recommended_learning_path(
+                state.user_id, state.job_id
+            )
             state.skill_coverage = coverage_result.get("skill_coverage", 0.0)
 
-            print(f"[{state.current_step}] Retrieved skill gap: {len(state.skill_gap)} skills")
+            print(
+                f"[{state.current_step}] Retrieved skill gap: {len(state.skill_gap)} skills"
+            )
             print(f"[{state.current_step}] Skill coverage: {state.skill_coverage:.2f}")
 
         except Exception as e:
@@ -188,7 +213,7 @@ class CareerAdvisorWorkflow:
                 "skill_gap_count": len(state.skill_gap),
                 "skill_coverage": state.skill_coverage,
                 "missing_skills": list(state.skill_gap.keys()),
-                "shortest_paths": state.shortest_paths[:3]  # Top 3 paths
+                "shortest_paths": state.shortest_paths[:3],  # Top 3 paths
             }
             state.context = context
 
@@ -196,7 +221,9 @@ class CareerAdvisorWorkflow:
             prompt = self._build_cot_prompt(state)
             state.prompt = prompt
 
-            print(f"[{state.current_step}] Constructed prompt with {len(state.skill_gap)} skill gaps")
+            print(
+                f"[{state.current_step}] Constructed prompt with {len(state.skill_gap)} skill gaps"
+            )
 
         except Exception as e:
             state.errors.append(f"Prompt construction error: {str(e)}")
@@ -207,17 +234,26 @@ class CareerAdvisorWorkflow:
     def _build_cot_prompt(self, state: WorkflowState) -> str:
         """Build Chain of Thought prompt."""
         # Format skill information
-        user_skills_str = ", ".join([f"{skill_id} ({level})"
-                                   for skill_id, level in state.user_skills.items()][:10])
-        required_skills_str = ", ".join([f"{skill_id} ({level})"
-                                       for skill_id, level in state.job_required_skills.items()])
+        user_skills_str = ", ".join(
+            [f"{skill_id} ({level})" for skill_id, level in state.user_skills.items()][
+                :10
+            ]
+        )
+        required_skills_str = ", ".join(
+            [
+                f"{skill_id} ({level})"
+                for skill_id, level in state.job_required_skills.items()
+            ]
+        )
 
         # Format skill gap
         skill_gap_items = []
         for skill_id, levels in state.skill_gap.items():
             user_level = levels.get("user_level", "None")
             required_level = levels.get("required_level", "Unknown")
-            skill_gap_items.append(f"- {skill_id}: Current={user_level}, Required={required_level}")
+            skill_gap_items.append(
+                f"- {skill_id}: Current={user_level}, Required={required_level}"
+            )
 
         skill_gap_str = "\n".join(skill_gap_items)
 
@@ -288,30 +324,22 @@ Use the skill paths above as guidance."""
             response = self.llm_simulator.generate(
                 prompt=state.prompt,
                 temperature=0.3,  # Low temperature for consistent output
-                max_tokens=1000
+                max_tokens=1000,
             )
 
             state.llm_response = response
+            try:
+                advice = validate_advice(response.get("response", ""))
+            except Exception as validation_error:
+                state.errors.append(f"LLM schema validation failed: {validation_error}")
+                advice = fallback_advice(state.skill_gap)
+            state.career_advice = advice.summary
+            state.learning_path = [step.model_dump() for step in advice.learning_path]
+            state.confidence_score = advice.confidence_score
 
-            # Parse response
-            if "response" in response:
-                llm_output = response["response"]
-
-                # Try to parse JSON
-                try:
-                    advice_data = json.loads(llm_output)
-                    state.career_advice = advice_data.get("summary", "")
-                    state.learning_path = advice_data.get("learning_path", [])
-                    state.confidence_score = advice_data.get("confidence_score", 0.5)
-                except json.JSONDecodeError:
-                    # Fallback: store raw text
-                    state.career_advice = llm_output
-                    state.confidence_score = 0.3
-            else:
-                state.career_advice = "Unable to generate advice at this time."
-                state.confidence_score = 0.1
-
-            print(f"[{state.current_step}] Generated advice with confidence {state.confidence_score:.2f}")
+            print(
+                f"[{state.current_step}] Generated advice with confidence {state.confidence_score:.2f}"
+            )
 
         except Exception as e:
             state.errors.append(f"LLM generation error: {str(e)}")
@@ -340,6 +368,11 @@ Use the skill paths above as guidance."""
         # Run workflow
         if LANGGRAPH_AVAILABLE:
             final_state = self.workflow.invoke(initial_state)
+            # Current LangGraph releases materialize dataclass state as a
+            # mapping at the compiled-graph boundary. Restore the documented
+            # workflow contract before callers access typed attributes.
+            if isinstance(final_state, dict):
+                final_state = WorkflowState(**final_state)
         else:
             # Manual execution
             final_state = initial_state
@@ -367,10 +400,12 @@ Use the skill paths above as guidance."""
             "confidence_score": state.confidence_score,
             "execution_time_ms": state.execution_time_ms,
             "error_count": len(state.errors),
-            "steps_completed": state.current_step.value
+            "steps_completed": state.current_step.value,
         }
 
 
-def create_default_workflow(graph_loader: Any, llm_simulator: Any) -> CareerAdvisorWorkflow:
+def create_default_workflow(
+    graph_loader: Any, llm_simulator: Any
+) -> CareerAdvisorWorkflow:
     """Create a default workflow instance."""
     return CareerAdvisorWorkflow(graph_loader, llm_simulator)

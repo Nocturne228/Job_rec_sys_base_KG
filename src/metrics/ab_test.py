@@ -17,17 +17,25 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
 
+from scipy import stats
 
 # ============================================================================
 # Statistical test primitives (no scipy)
 # ============================================================================
 
+
 def _normal_cdf(x: float) -> float:
     """Standard normal CDF (Abramowitz & Stegun)."""
-    a1, a2, a3, a4, a5 = 0.254829592, -0.284496736, 1.421413741, -1.453152027, 1.061405429
+    a1, a2, a3, a4, a5 = (
+        0.254829592,
+        -0.284496736,
+        1.421413741,
+        -1.453152027,
+        1.061405429,
+    )
     p = 0.3275911
     sign = 1 if x >= 0 else -1
     x = abs(x) / math.sqrt(2)
@@ -36,8 +44,9 @@ def _normal_cdf(x: float) -> float:
     return 0.5 * (1.0 + sign * y)
 
 
-def z_test_proportions(p1: float, n1: int, p2: float, n2: int,
-                       alternative: str = "greater") -> Dict[str, float]:
+def z_test_proportions(
+    p1: float, n1: int, p2: float, n2: int, alternative: str = "greater"
+) -> Dict[str, float]:
     """Two-sample z-test for proportions.
 
     Args:
@@ -45,7 +54,8 @@ def z_test_proportions(p1: float, n1: int, p2: float, n2: int,
         p2, n2: treatment group proportion and sample size
         alternative: "greater", "less", "two_sided"
     """
-    se = math.sqrt(p1 * (1 - p1) / max(n1, 1) + p2 * (1 - p2) / max(n2, 1)) + 1e-12
+    pooled = (p1 * n1 + p2 * n2) / max(n1 + n2, 1)
+    se = math.sqrt(pooled * (1 - pooled) * (1 / max(n1, 1) + 1 / max(n2, 1))) + 1e-12
     z = (p2 - p1) / se
 
     if alternative == "greater":
@@ -63,21 +73,10 @@ def welch_t_test(xs: List[float], ys: List[float]) -> Dict[str, float]:
     if len(xs) < 2 or len(ys) < 2:
         return {"t": 0.0, "df": 0, "p_value": 1.0}
 
-    mx = sum(xs) / len(xs)
-    my = sum(ys) / len(ys)
-    var_x = sum((v - mx) ** 2 for v in xs) / (len(xs) - 1)
-    var_y = sum((v - my) ** 2 for v in ys) / (len(ys) - 1)
-
-    se = math.sqrt(var_x / len(xs) + var_y / len(ys)) + 1e-12
-    t_stat = (my - mx) / se
-
-    # Welch-Satterthwaite degrees of freedom
-    num = (var_x / len(xs) + var_y / len(ys)) ** 2
-    den = ((var_x / len(xs)) ** 2 / (len(xs) - 1) +
-           (var_y / len(ys)) ** 2 / (len(ys) - 1)) + 1e-12
-    df = num / den
-
-    p_value = 2 * (1 - _normal_cdf(abs(t_stat)))
+    result = stats.ttest_ind(ys, xs, equal_var=False)
+    t_stat = float(result.statistic)
+    p_value = float(result.pvalue)
+    df = float(result.df)
 
     return {"t": round(t_stat, 4), "df": round(df, 2), "p_value": round(p_value, 4)}
 
@@ -88,29 +87,21 @@ def mann_whitney_u(xs: List[float], ys: List[float]) -> Dict[str, float]:
     if n1 == 0 or n2 == 0:
         return {"U": 0.0, "z": 0.0, "p_value": 1.0}
 
-    combined = sorted(
-        [(v, 0) for v in xs] + [(v, 1) for v in ys],
-        key=lambda x: x[0],
-    )
-    ranks_x = 0.0
-    for rank_i, (_, grp) in enumerate(combined, 1):
-        if grp == 0:
-            ranks_x += rank_i
-
-    U = ranks_x - n1 * (n1 + 1) / 2
-
-    # Normal approximation
+    result = stats.mannwhitneyu(xs, ys, alternative="two-sided", method="auto")
+    U = float(result.statistic)
+    p_value = float(result.pvalue)
     mu = n1 * n2 / 2
     sigma = math.sqrt(n1 * n2 * (n1 + n2 + 1) / 12) + 1e-12
     z = (U - mu) / sigma
-    p_value = 2 * (1 - _normal_cdf(abs(z)))
 
     return {"U": round(U, 2), "z": round(z, 4), "p_value": round(p_value, 4)}
 
 
 def bootstrap_ci(
-    xs: List[float], ys: List[float],
-    statistic="mean_diff", n_bootstrap: int = 2000,
+    xs: List[float],
+    ys: List[float],
+    statistic="mean_diff",
+    n_bootstrap: int = 2000,
     confidence: float = 0.95,
 ) -> Dict[str, float]:
     """Bootstrap confidence interval for difference in means.
@@ -140,8 +131,11 @@ def bootstrap_ci(
 
 
 def sample_size_proportion(
-    baseline: float, mde: float, alpha: float = 0.05,
-    power: float = 0.8, ratio: float = 1.0,
+    baseline: float,
+    mde: float,
+    alpha: float = 0.05,
+    power: float = 0.8,
+    ratio: float = 1.0,
 ) -> int:
     """Sample size per group to detect a change from baseline → baseline + mde.
 
@@ -192,9 +186,11 @@ def _normal_ppf(p: float) -> float:
 # ABTest: run a single test given collected data
 # ============================================================================
 
+
 @dataclass
 class ABTestResult:
     """Result of a single metric comparison."""
+
     metric: str
     test_method: str
     p_value: float
@@ -208,10 +204,15 @@ class ABTest:
     def __init__(self, alpha: float = 0.05):
         self.alpha = alpha
 
-    def compare_proportions(self, metric: str,
-                             a_count: int, a_total: int,
-                             b_count: int, b_total: int,
-                             alternative: str = "greater") -> ABTestResult:
+    def compare_proportions(
+        self,
+        metric: str,
+        a_count: int,
+        a_total: int,
+        b_count: int,
+        b_total: int,
+        alternative: str = "greater",
+    ) -> ABTestResult:
         """z-test for proportions (CVR, CTR)."""
         p_a = a_count / max(a_total, 1)
         p_b = b_count / max(b_total, 1)
@@ -230,8 +231,9 @@ class ABTest:
             },
         )
 
-    def compare_means(self, metric: str,
-                       a_values: List[float], b_values: List[float]) -> ABTestResult:
+    def compare_means(
+        self, metric: str, a_values: List[float], b_values: List[float]
+    ) -> ABTestResult:
         """Welch's t-test for means (avg clicks, avg dwell time)."""
         res = welch_t_test(a_values, b_values)
         return ABTestResult(
@@ -247,8 +249,9 @@ class ABTest:
             },
         )
 
-    def compare_distributions(self, metric: str,
-                               a_values: List[float], b_values: List[float]) -> ABTestResult:
+    def compare_distributions(
+        self, metric: str, a_values: List[float], b_values: List[float]
+    ) -> ABTestResult:
         """Mann-Whitney U test (NDCG, ranking metrics)."""
         res = mann_whitney_u(a_values, b_values)
         return ABTestResult(
@@ -262,9 +265,13 @@ class ABTest:
             },
         )
 
-    def confidence_interval(self, metric: str,
-                             a_values: List[float], b_values: List[float],
-                             confidence: float = 0.95) -> ABTestResult:
+    def confidence_interval(
+        self,
+        metric: str,
+        a_values: List[float],
+        b_values: List[float],
+        confidence: float = 0.95,
+    ) -> ABTestResult:
         """Bootstrap CI for delta in means."""
         res = bootstrap_ci(a_values, b_values, confidence=confidence)
         return ABTestResult(
@@ -285,24 +292,26 @@ class ABTest:
 # ABExperiment: full experiment lifecycle
 # ============================================================================
 
+
 @dataclass
 class ExperimentDesign:
     """A/B experiment design parameters."""
+
     name: str
-    baseline_metric: float        # e.g. current CVR = 0.02
-    mde: float                    # minimum detectable effect (absolute), e.g. 0.005
+    baseline_metric: float  # e.g. current CVR = 0.02
+    mde: float  # minimum detectable effect (absolute), e.g. 0.005
     alpha: float = 0.05
     power: float = 0.8
-    ratio: float = 1.0            # A:B = 1:1
+    ratio: float = 1.0  # A:B = 1:1
     duration_days: int = 14
-    primary_metric: str = "cvr"   # which metric drives sample size
+    primary_metric: str = "cvr"  # which metric drives sample size
     secondary_metrics: List[str] = field(default_factory=lambda: ["ctr", "ndcg@10"])
 
 
 @dataclass
 class UserAssignment:
     user_id: str
-    group: str       # "A" or "B"
+    group: str  # "A" or "B"
 
 
 class ABExperiment:
@@ -370,8 +379,10 @@ class ABExperiment:
         return counts
 
     def enrolled_users(self) -> Dict[str, int]:
-        return {"A": sum(1 for g in self.assignments.values() if g == "A"),
-                "B": sum(1 for g in self.assignments.values() if g == "B")}
+        return {
+            "A": sum(1 for g in self.assignments.values() if g == "A"),
+            "B": sum(1 for g in self.assignments.values() if g == "B"),
+        }
 
     # ----- 3. Metric logging -----
 
@@ -430,7 +441,9 @@ class ABExperiment:
 
         # Avg clicks: Welch's t-test
         if clicks_a and clicks_b:
-            results["avg_clicks"] = tester.compare_means("avg_clicks", clicks_a, clicks_b)
+            results["avg_clicks"] = tester.compare_means(
+                "avg_clicks", clicks_a, clicks_b
+            )
 
         # NDCG@10: Mann-Whitney U
         if ndcg_a and ndcg_b:

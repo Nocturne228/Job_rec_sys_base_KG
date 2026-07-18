@@ -2,24 +2,28 @@
 LightGCN implementation for collaborative filtering recall.
 Based on the paper: "LightGCN: Simplifying and Powering Graph Convolution Network for Recommendation"
 """
+
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 from scipy import sparse
-from typing import List, Tuple, Optional, Dict, Any
 
 
 class LightGCN(nn.Module):
     """LightGCN model for collaborative filtering."""
 
-    def __init__(self,
-                 n_users: int,
-                 n_items: int,
-                 embedding_dim: int = 64,
-                 n_layers: int = 3,
-                 dropout: float = 0.0,
-                 device: str = "cpu"):
+    def __init__(
+        self,
+        n_users: int,
+        n_items: int,
+        embedding_dim: int = 64,
+        n_layers: int = 3,
+        dropout: float = 0.0,
+        device: str = "cpu",
+    ):
         """
         Initialize LightGCN.
 
@@ -64,7 +68,9 @@ class LightGCN(nn.Module):
             item_embeddings: Final item embeddings after propagation
         """
         # Initial embeddings (Eq. 1)
-        all_embeddings = [torch.cat([self.user_embedding.weight, self.item_embedding.weight], dim=0)]
+        all_embeddings = [
+            torch.cat([self.user_embedding.weight, self.item_embedding.weight], dim=0)
+        ]
 
         # Propagation through layers (Eq. 2-3)
         for layer_idx in range(self.n_layers):
@@ -81,20 +87,24 @@ class LightGCN(nn.Module):
         final_embeddings = torch.stack(all_embeddings, dim=0).mean(dim=0)
 
         # Split into user and item embeddings
-        user_embeddings = final_embeddings[:self.n_users]
-        item_embeddings = final_embeddings[self.n_users:]
+        user_embeddings = final_embeddings[: self.n_users]
+        item_embeddings = final_embeddings[self.n_users :]
 
         return user_embeddings, item_embeddings
 
-    def get_embeddings(self, adj_matrix: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def get_embeddings(
+        self, adj_matrix: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Get user and item embeddings (convenience wrapper for forward)."""
         return self.forward(adj_matrix)
 
-    def predict(self,
-                user_embeddings: torch.Tensor,
-                item_embeddings: torch.Tensor,
-                user_ids: torch.Tensor,
-                item_ids: torch.Tensor) -> torch.Tensor:
+    def predict(
+        self,
+        user_embeddings: torch.Tensor,
+        item_embeddings: torch.Tensor,
+        user_ids: torch.Tensor,
+        item_ids: torch.Tensor,
+    ) -> torch.Tensor:
         """
         Predict scores for user-item pairs.
 
@@ -115,13 +125,15 @@ class LightGCN(nn.Module):
 
         return scores
 
-    def recommend_for_user(self,
-                          user_idx: int,
-                          user_embeddings: torch.Tensor,
-                          item_embeddings: torch.Tensor,
-                          k: int = 10,
-                          exclude_interacted: bool = True,
-                          interacted_items: Optional[List[int]] = None) -> Tuple[List[int], List[float]]:
+    def recommend_for_user(
+        self,
+        user_idx: int,
+        user_embeddings: torch.Tensor,
+        item_embeddings: torch.Tensor,
+        k: int = 10,
+        exclude_interacted: bool = True,
+        interacted_items: Optional[List[int]] = None,
+    ) -> Tuple[List[int], List[float]]:
         """
         Generate recommendations for a user.
 
@@ -140,23 +152,27 @@ class LightGCN(nn.Module):
         user_vec = user_embeddings[user_idx].unsqueeze(0)  # Shape: (1, embedding_dim)
 
         # Compute scores for all items
-        scores = torch.matmul(user_vec, item_embeddings.T).squeeze(0)  # Shape: (n_items,)
+        scores = torch.matmul(user_vec, item_embeddings.T).squeeze(
+            0
+        )  # Shape: (n_items,)
 
         # Exclude interacted items if specified
         if exclude_interacted and interacted_items is not None:
-            scores[interacted_items] = -float('inf')
+            scores[interacted_items] = -float("inf")
 
         # Get top-k items
         topk_scores, topk_indices = torch.topk(scores, min(k, len(scores)))
 
         return topk_indices.cpu().tolist(), topk_scores.cpu().tolist()
 
-    def bpr_loss(self,
-                 user_embeddings: torch.Tensor,
-                 item_embeddings: torch.Tensor,
-                 user_ids: torch.Tensor,
-                 pos_item_ids: torch.Tensor,
-                 neg_item_ids: torch.Tensor) -> torch.Tensor:
+    def bpr_loss(
+        self,
+        user_embeddings: torch.Tensor,
+        item_embeddings: torch.Tensor,
+        user_ids: torch.Tensor,
+        pos_item_ids: torch.Tensor,
+        neg_item_ids: torch.Tensor,
+    ) -> torch.Tensor:
         """
         Compute BPR loss (Bayesian Personalized Ranking).
 
@@ -198,33 +214,38 @@ class LightGCN(nn.Module):
 
     def save(self, path: str) -> None:
         """Save model state."""
-        torch.save({
-            'state_dict': self.state_dict(),
-            'n_users': self.n_users,
-            'n_items': self.n_items,
-            'embedding_dim': self.embedding_dim,
-            'n_layers': self.n_layers,
-            'dropout': self.dropout,
-        }, path)
+        torch.save(
+            {
+                "state_dict": self.state_dict(),
+                "n_users": self.n_users,
+                "n_items": self.n_items,
+                "embedding_dim": self.embedding_dim,
+                "n_layers": self.n_layers,
+                "dropout": self.dropout,
+            },
+            path,
+        )
 
     @classmethod
-    def load(cls, path: str, device: str = "cpu") -> 'LightGCN':
+    def load(cls, path: str, device: str = "cpu") -> "LightGCN":
         """Load model from saved state."""
         checkpoint = torch.load(path, map_location=device)
         model = cls(
-            n_users=checkpoint['n_users'],
-            n_items=checkpoint['n_items'],
-            embedding_dim=checkpoint['embedding_dim'],
-            n_layers=checkpoint['n_layers'],
-            dropout=checkpoint['dropout'],
-            device=device
+            n_users=checkpoint["n_users"],
+            n_items=checkpoint["n_items"],
+            embedding_dim=checkpoint["embedding_dim"],
+            n_layers=checkpoint["n_layers"],
+            dropout=checkpoint["dropout"],
+            device=device,
         )
-        model.load_state_dict(checkpoint['state_dict'])
+        model.load_state_dict(checkpoint["state_dict"])
         model.to(device)
         return model
 
 
-def prepare_adj_matrix(sparse_adj: sparse.csr_matrix, device: str = "cpu") -> torch.Tensor:
+def prepare_adj_matrix(
+    sparse_adj: sparse.csr_matrix, device: str = "cpu"
+) -> torch.Tensor:
     """
     Prepare adjacency matrix for LightGCN.
 
@@ -243,6 +264,12 @@ def prepare_adj_matrix(sparse_adj: sparse.csr_matrix, device: str = "cpu") -> to
     values = torch.tensor(coo.data, dtype=torch.float)
 
     # Create sparse tensor
-    adj_tensor = torch.sparse_coo_tensor(indices, values, coo.shape, device=device)
+    adj_tensor = torch.sparse_coo_tensor(
+        indices,
+        values,
+        coo.shape,
+        device=device,
+        check_invariants=True,
+    )
 
     return adj_tensor.coalesce()

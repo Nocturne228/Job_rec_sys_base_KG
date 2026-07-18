@@ -1,17 +1,43 @@
 """
 Training utilities for LightGCN model.
 """
+
+import time
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import numpy as np
-from typing import Dict, List, Tuple, Optional, Any
-import time
 from tqdm import tqdm
 
-from recall.lightgcn import LightGCN, prepare_adj_matrix
-from data.loader import DataLoader as GraphDataLoader
-from config.settings import get_settings
+from src.config.settings import get_settings
+from src.data.loader import DataLoader as GraphDataLoader
+from src.recall.lightgcn import LightGCN, prepare_adj_matrix
+
+
+def sample_unobserved_negatives(
+    train_r: torch.Tensor, user_ids: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Sample one unobserved item per user.
+
+    Returns the negative item IDs and the positions retained from ``user_ids``.
+    Fully saturated users are excluded because no valid BPR negative exists.
+    """
+    negative_items = []
+    valid_positions = []
+    for position, user_id in enumerate(user_ids.tolist()):
+        candidates = torch.nonzero(train_r[user_id] == 0).flatten()
+        if candidates.numel() > 0:
+            negative_items.append(candidates[torch.randint(candidates.numel(), (1,))])
+            valid_positions.append(position)
+    if not negative_items:
+        empty = torch.empty(0, dtype=torch.long, device=train_r.device)
+        return empty, empty
+    return (
+        torch.cat(negative_items).to(train_r.device),
+        torch.tensor(valid_positions, dtype=torch.long, device=train_r.device),
+    )
 
 
 def create_data_loaders(data: Any, test_ratio: float = 0.2) -> Tuple[Any, Any]:
@@ -27,22 +53,27 @@ def create_data_loaders(data: Any, test_ratio: float = 0.2) -> Tuple[Any, Any]:
     """
     # This is a simplified version - in practice would use PyTorch DataLoader
     # For now, return the DataLoader instances
-    if hasattr(data, '__class__') and data.__class__.__name__ == 'GraphEntities':
+    if hasattr(data, "__class__") and data.__class__.__name__ == "GraphEntities":
         # Create DataLoader from GraphEntities
         data_loader = GraphDataLoader(data)
-        return data_loader, data_loader  # Same loader for both in this simplified version
+        return (
+            data_loader,
+            data_loader,
+        )  # Same loader for both in this simplified version
     else:
         # Assume it's already a DataLoader
         return data, data
 
 
-def train_lightgcn(model: LightGCN,
-                  data_loader: Any,
-                  n_epochs: int = 100,
-                  learning_rate: float = 0.001,
-                  weight_decay: float = 1e-4,
-                  device: str = "cpu",
-                  verbose: bool = True) -> Dict[str, Any]:
+def train_lightgcn(
+    model: LightGCN,
+    data_loader: Any,
+    n_epochs: int = 100,
+    learning_rate: float = 0.001,
+    weight_decay: float = 1e-4,
+    device: str = "cpu",
+    verbose: bool = True,
+) -> Dict[str, Any]:
     """
     Train LightGCN model.
 
@@ -59,13 +90,15 @@ def train_lightgcn(model: LightGCN,
         Dictionary with training history and metrics
     """
     settings = get_settings()
+    torch.manual_seed(settings.system.random_seed)
+    np.random.seed(settings.system.random_seed)
     model.to(device)
     model.train()
 
     # Optimizer
-    optimizer = optim.Adam(model.parameters(),
-                          lr=learning_rate,
-                          weight_decay=weight_decay)
+    optimizer = optim.Adam(
+        model.parameters(), lr=learning_rate, weight_decay=weight_decay
+    )
 
     # Prepare adjacency matrix
     adj_matrix = data_loader.get_sparse_graph()
@@ -79,15 +112,10 @@ def train_lightgcn(model: LightGCN,
     test_R_tensor = torch.tensor(test_R.toarray(), device=device)
 
     # Training history
-    history = {
-        'loss': [],
-        'epoch_time': [],
-        'train_metrics': [],
-        'test_metrics': []
-    }
+    history = {"loss": [], "epoch_time": [], "train_metrics": [], "test_metrics": []}
 
     # Early stopping
-    best_loss = float('inf')
+    best_loss = float("inf")
     patience = 10
     patience_counter = 0
 
@@ -114,17 +142,25 @@ def train_lightgcn(model: LightGCN,
         user_ids = batch_pairs[:, 0]
         pos_item_ids = batch_pairs[:, 1]
 
-        # Sample negative items
-        neg_item_ids = torch.randint(0, n_items, (batch_size,), device=device)
+        # Negatives must not be observed training interactions. Sampling from
+        # all items can mark a positive edge as negative and corrupt BPR.
+        neg_item_ids, valid_positions_tensor = sample_unobserved_negatives(
+            train_R_tensor, user_ids
+        )
+        if neg_item_ids.numel() == 0:
+            continue
+        user_ids = user_ids[valid_positions_tensor]
+        pos_item_ids = pos_item_ids[valid_positions_tensor]
 
         # Compute loss
-        loss = model.bpr_loss(user_embeddings, item_embeddings,
-                             user_ids, pos_item_ids, neg_item_ids)
+        loss = model.bpr_loss(
+            user_embeddings, item_embeddings, user_ids, pos_item_ids, neg_item_ids
+        )
 
         # Add regularization
         reg_loss = weight_decay * (
-            model.user_embedding.weight.norm(2).pow(2) +
-            model.item_embedding.weight.norm(2).pow(2)
+            model.user_embedding.weight.norm(2).pow(2)
+            + model.item_embedding.weight.norm(2).pow(2)
         )
         total_loss = loss + reg_loss
 
@@ -135,28 +171,33 @@ def train_lightgcn(model: LightGCN,
 
         # Record history
         epoch_time = time.time() - epoch_start
-        history['loss'].append(total_loss.item())
-        history['epoch_time'].append(epoch_time)
+        history["loss"].append(total_loss.item())
+        history["epoch_time"].append(epoch_time)
 
         # Evaluate periodically
         if (epoch + 1) % 10 == 0 or epoch == n_epochs - 1:
-            train_metrics = evaluate_model(model, train_R_tensor, adj_tensor, device, k_values=[20])
-            test_metrics = evaluate_model(model, test_R_tensor, adj_tensor, device, k_values=[20])
+            train_metrics = evaluate_model(
+                model, train_R_tensor, adj_tensor, device, k_values=[20]
+            )
+            test_metrics = evaluate_model(
+                model,
+                test_R_tensor,
+                adj_tensor,
+                device,
+                k_values=[20],
+                train_R=train_R_tensor,
+            )
 
-            history['train_metrics'].append({
-                'epoch': epoch,
-                **train_metrics
-            })
-            history['test_metrics'].append({
-                'epoch': epoch,
-                **test_metrics
-            })
+            history["train_metrics"].append({"epoch": epoch, **train_metrics})
+            history["test_metrics"].append({"epoch": epoch, **test_metrics})
 
             if verbose:
-                print(f"Epoch {epoch+1}/{n_epochs}, "
-                      f"Loss: {total_loss.item():.4f}, "
-                      f"Recall@20: {test_metrics.get('recall@20', 0):.4f}, "
-                      f"NDCG@20: {test_metrics.get('ndcg@20', 0):.4f}")
+                print(
+                    f"Epoch {epoch+1}/{n_epochs}, "
+                    f"Loss: {total_loss.item():.4f}, "
+                    f"Recall@20: {test_metrics.get('recall@20', 0):.4f}, "
+                    f"NDCG@20: {test_metrics.get('ndcg@20', 0):.4f}"
+                )
 
             # Early stopping check
             current_loss = total_loss.item()
@@ -176,25 +217,30 @@ def train_lightgcn(model: LightGCN,
     model.eval()
     with torch.no_grad():
         final_train_metrics = evaluate_model(model, train_R_tensor, adj_tensor, device)
-        final_test_metrics = evaluate_model(model, test_R_tensor, adj_tensor, device)
+        final_test_metrics = evaluate_model(
+            model, test_R_tensor, adj_tensor, device, train_R=train_R_tensor
+        )
 
     results = {
-        'model': model,
-        'history': history,
-        'final_train_metrics': final_train_metrics,
-        'final_test_metrics': final_test_metrics,
-        'n_epochs_trained': len(history['loss']),
-        'best_loss': min(history['loss']) if history['loss'] else float('inf')
+        "model": model,
+        "history": history,
+        "final_train_metrics": final_train_metrics,
+        "final_test_metrics": final_test_metrics,
+        "n_epochs_trained": len(history["loss"]),
+        "best_loss": min(history["loss"]) if history["loss"] else float("inf"),
     }
 
     return results
 
 
-def evaluate_model(model: LightGCN,
-                  R: torch.Tensor,
-                  adj_matrix: torch.Tensor,
-                  device: str = "cpu",
-                  k_values: List[int] = [5, 10, 20]) -> Dict[str, float]:
+def evaluate_model(
+    model: LightGCN,
+    R: torch.Tensor,
+    adj_matrix: torch.Tensor,
+    device: str = "cpu",
+    k_values: List[int] = [5, 10, 20],
+    train_R: Optional[torch.Tensor] = None,
+) -> Dict[str, float]:
     """
     Evaluate model performance.
 
@@ -219,20 +265,32 @@ def evaluate_model(model: LightGCN,
             test_users = test_users.unsqueeze(0)
 
         if len(test_users) == 0:
-            return {f'recall@{k}': 0.0 for k in k_values}
+            return {f"recall@{k}": 0.0 for k in k_values}
 
         # Compute scores for all items for test users
         user_vectors = user_embeddings[test_users]  # (n_test_users, embedding_dim)
-        scores = torch.matmul(user_vectors, item_embeddings.T)  # (n_test_users, n_items)
+        scores = torch.matmul(
+            user_vectors, item_embeddings.T
+        )  # (n_test_users, n_items)
+
+        # Test ranking must exclude edges already available during training;
+        # otherwise metrics are inflated by recommending seen jobs.
+        if train_R is not None:
+            scores = scores.masked_fill(train_R[test_users] > 0, -torch.inf)
 
         # Get ground truth
         ground_truth = R[test_users] > 0  # Binary matrix
 
         # Compute metrics
         metrics = {}
+        topk_by_k = {}
         for k in k_values:
+            effective_k = min(k, model.n_items)
+            if effective_k == 0:
+                continue
             # Get top-k items for each user
-            _, topk_indices = torch.topk(scores, k=k, dim=1)
+            _, topk_indices = torch.topk(scores, k=effective_k, dim=1)
+            topk_by_k[k] = topk_indices
 
             # Compute recall@k
             recall_sum = 0.0
@@ -257,18 +315,23 @@ def evaluate_model(model: LightGCN,
                         dcg += 1.0 / torch.log2(torch.tensor(j + 2.0, device=device))
 
                 # Ideal DCG
-                ideal_hits = min(k, len(user_gt))
-                idcg = sum(1.0 / torch.log2(torch.tensor(j + 2.0, device=device))
-                          for j in range(ideal_hits))
+                ideal_hits = min(effective_k, len(user_gt))
+                idcg = sum(
+                    1.0 / torch.log2(torch.tensor(j + 2.0, device=device))
+                    for j in range(ideal_hits)
+                )
 
                 ndcg = dcg / idcg if idcg > 0 else 0.0
                 ndcg_sum += ndcg.item()
 
-            metrics[f'recall@{k}'] = recall_sum / len(test_users)
-            metrics[f'ndcg@{k}'] = ndcg_sum / len(test_users)
+            metrics[f"recall@{k}"] = recall_sum / len(test_users)
+            metrics[f"ndcg@{k}"] = ndcg_sum / len(test_users)
 
         # Compute precision@k and mrr
         for k in k_values:
+            if k not in topk_by_k:
+                continue
+            topk_indices = topk_by_k[k]
             # Precision@k: directly computed as hits / k
             precision_sum = 0.0
             for i in range(len(test_users)):
@@ -277,8 +340,8 @@ def evaluate_model(model: LightGCN,
                 if user_gt.dim() == 0:
                     user_gt = user_gt.unsqueeze(0)
                 hits = torch.isin(user_topk, user_gt.to(user_topk.device)).sum().item()
-                precision_sum += hits / k
-            metrics[f'precision@{k}'] = precision_sum / len(test_users)
+                precision_sum += hits / topk_indices.shape[1]
+            metrics[f"precision@{k}"] = precision_sum / len(test_users)
 
             # MRR@k: mean reciprocal rank
             mrr_sum = 0.0
@@ -295,10 +358,13 @@ def evaluate_model(model: LightGCN,
                 if hit_positions.numel() > 0:
                     first_hit = hit_positions[0].item() + 1  # 1-indexed
                     mrr_sum += 1.0 / first_hit
-            metrics[f'mrr@{k}'] = mrr_sum / len(test_users)
+            metrics[f"mrr@{k}"] = mrr_sum / len(test_users)
 
         # HitRate@k: fraction of users with at least one hit in top-k
         for k in k_values:
+            if k not in topk_by_k:
+                continue
+            topk_indices = topk_by_k[k]
             hit_count = 0
             for i in range(len(test_users)):
                 user_topk = topk_indices[i]
@@ -308,15 +374,18 @@ def evaluate_model(model: LightGCN,
                 if len(user_gt) > 0 and user_gt.numel() > 0:
                     if torch.isin(user_topk, user_gt.to(user_topk.device)).any():
                         hit_count += 1
-            metrics[f'hitrate@{k}'] = hit_count / len(test_users)
+            metrics[f"hitrate@{k}"] = hit_count / len(test_users)
 
         # Catalog Coverage@k: fraction of unique items recommended across all users
         for k in k_values:
+            if k not in topk_by_k:
+                continue
+            topk_indices = topk_by_k[k]
             all_recommended = set()
             for i in range(len(test_users)):
                 items = topk_indices[i].tolist()
                 all_recommended.update(items[:k])
-            metrics[f'coverage@{k}'] = len(all_recommended) / model.n_items
+            metrics[f"coverage@{k}"] = len(all_recommended) / model.n_items
 
         # Compute AUC (simplified)
         try:
@@ -339,15 +408,16 @@ def evaluate_model(model: LightGCN,
             auc = torch.sum(cum_sum * (1.0 - sorted_labels)) / (
                 torch.sum(sorted_labels) * torch.sum(1.0 - sorted_labels)
             )
-            metrics['auc'] = auc.item() if not torch.isnan(auc) else 0.0
+            metrics["auc"] = auc.item() if not torch.isnan(auc) else 0.0
         except:
-            metrics['auc'] = 0.0
+            metrics["auc"] = 0.0
 
     return metrics
 
 
-def train_full_pipeline(data: Any,
-                       config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def train_full_pipeline(
+    data: Any, config: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     """
     Train full pipeline: LightGCN + optionally other components.
 
@@ -360,20 +430,25 @@ def train_full_pipeline(data: Any,
     """
     settings = get_settings()
 
+    # Seed before model construction. Seeding only inside train_lightgcn() is
+    # too late because embedding initialization has already consumed RNG state.
+    torch.manual_seed(settings.system.random_seed)
+    np.random.seed(settings.system.random_seed)
+
     # Use config or settings
     if config is None:
         config = {
-            'lightgcn_embedding_dim': settings.model.lightgcn_embedding_dim,
-            'lightgcn_n_layers': settings.model.lightgcn_n_layers,
-            'lightgcn_dropout': settings.model.lightgcn_dropout,
-            'learning_rate': settings.model.lightgcn_learning_rate,
-            'weight_decay': settings.model.lightgcn_weight_decay,
-            'n_epochs': 50,
-            'device': settings.system.device.value
+            "lightgcn_embedding_dim": settings.model.lightgcn_embedding_dim,
+            "lightgcn_n_layers": settings.model.lightgcn_n_layers,
+            "lightgcn_dropout": settings.model.lightgcn_dropout,
+            "learning_rate": settings.model.lightgcn_learning_rate,
+            "weight_decay": settings.model.lightgcn_weight_decay,
+            "n_epochs": 50,
+            "device": settings.system.device.value,
         }
 
     # Create data loader
-    if hasattr(data, '__class__') and data.__class__.__name__ == 'GraphEntities':
+    if hasattr(data, "__class__") and data.__class__.__name__ == "GraphEntities":
         data_loader = GraphDataLoader(data)
     else:
         data_loader = data
@@ -386,29 +461,29 @@ def train_full_pipeline(data: Any,
     model = LightGCN(
         n_users=n_users,
         n_items=n_items,
-        embedding_dim=config['lightgcn_embedding_dim'],
-        n_layers=config['lightgcn_n_layers'],
-        dropout=config['lightgcn_dropout'],
-        device=config['device']
+        embedding_dim=config["lightgcn_embedding_dim"],
+        n_layers=config["lightgcn_n_layers"],
+        dropout=config["lightgcn_dropout"],
+        device=config["device"],
     )
 
     # Train model
     results = train_lightgcn(
         model=model,
         data_loader=data_loader,
-        n_epochs=config['n_epochs'],
-        learning_rate=config['learning_rate'],
-        weight_decay=config['weight_decay'],
-        device=config['device'],
-        verbose=True
+        n_epochs=config["n_epochs"],
+        learning_rate=config["learning_rate"],
+        weight_decay=config["weight_decay"],
+        device=config["device"],
+        verbose=True,
     )
 
     # Add configuration to results
-    results['config'] = config
-    results['data_stats'] = {
-        'n_users': n_users,
-        'n_items': n_items,
-        'n_interactions': data_loader.R.nnz
+    results["config"] = config
+    results["data_stats"] = {
+        "n_users": n_users,
+        "n_items": n_items,
+        "n_interactions": data_loader.R.nnz,
     }
 
     return results
@@ -420,15 +495,16 @@ def save_training_results(results: Dict[str, Any], path: str) -> None:
 
     # Don't save the model in the results (save separately)
     saved_results = results.copy()
-    if 'model' in saved_results:
-        del saved_results['model']
+    if "model" in saved_results:
+        del saved_results["model"]
 
-    with open(path, 'wb') as f:
+    with open(path, "wb") as f:
         pickle.dump(saved_results, f)
 
 
 def load_training_results(path: str) -> Dict[str, Any]:
     """Load training results from file."""
     import pickle
-    with open(path, 'rb') as f:
+
+    with open(path, "rb") as f:
         return pickle.load(f)

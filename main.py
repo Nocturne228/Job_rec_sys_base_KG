@@ -3,21 +3,24 @@
 工作推荐系统主入口。
 演示从数据生成到职业建议的完整推荐管线：召回 → 排序 → 生成。
 """
-import sys
+
 import json
+import os
+import sys
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Any, Dict, List
 
-# 将 src 目录添加到 Python 模块搜索路径
-src_path = Path(__file__).parent / "src"
-sys.path.insert(0, str(src_path))
-
-from data import generate_mock_data, DataLoader, GraphLoader, GraphEntities
-from ranking import LinearFusionRanker, SkillCoverageCalculator, GATSkillWeighter, RankingFeatures
-from recall import LightGCN, SBERTRecall, EnsembleRecall
-from generation import CareerAdvisorWorkflow, LLMSimulator
-from config import get_settings, update_settings
-from utils.training import train_full_pipeline
+from src.config import get_settings, update_settings
+from src.data import DataLoader, GraphEntities, GraphLoader, generate_mock_data
+from src.generation import CareerAdvisorWorkflow, LLMSimulator
+from src.ranking import (
+    GATSkillWeighter,
+    LinearFusionRanker,
+    RankingFeatures,
+    SkillCoverageCalculator,
+)
+from src.recall import EnsembleRecall, LightGCN, SBERTRecall
+from src.utils.training import train_full_pipeline
 
 
 def setup_directories():
@@ -49,16 +52,20 @@ def generate_and_save_data():
     settings = get_settings()
     data = generate_mock_data(
         num_users=settings.data.n_users,
-        num_jobs=settings.data.n_jobs
+        num_jobs=settings.data.n_jobs,
+        seed=settings.system.random_seed,
     )
 
     # 持久化数据
     import pickle
+
     data_path = Path("data") / "mock_data.pkl"
     with open(data_path, "wb") as f:
         pickle.dump(data, f)
 
-    print(f"Generated {len(data.users)} users, {len(data.jobs)} jobs, {len(data.skills)} skills")
+    print(
+        f"Generated {len(data.users)} users, {len(data.jobs)} jobs, {len(data.skills)} skills"
+    )
     print(f"Saved data to {data_path}")
 
     return data
@@ -85,19 +92,23 @@ def train_lightgcn_model(data):
 
     # 创建数据加载器
     data_loader = DataLoader(data)
-    print(f"Data loader created: {data_loader.n_users} users, {data_loader.n_jobs} jobs")
+    print(
+        f"Data loader created: {data_loader.n_users} users, {data_loader.n_jobs} jobs"
+    )
     print(f"Training interactions: {data_loader.train_R.nnz}")
     print(f"Test interactions: {data_loader.test_R.nnz}")
 
     # 训练模型
     results = train_full_pipeline(data_loader)
 
-    model = results['model']
-    final_metrics = results['final_test_metrics']
+    model = results["model"]
+    final_metrics = results["final_test_metrics"]
 
     print("\nTraining completed!")
-    print(f"Final metrics - Recall@20: {final_metrics.get('recall@20', 0):.4f}, "
-          f"NDCG@20: {final_metrics.get('ndcg@20', 0):.4f}")
+    print(
+        f"Final metrics - Recall@20: {final_metrics.get('recall@20', 0):.4f}, "
+        f"NDCG@20: {final_metrics.get('ndcg@20', 0):.4f}"
+    )
 
     # 保存模型
     model_path = Path("models") / "lightgcn_model.pt"
@@ -123,7 +134,11 @@ def setup_sbert_recall(data):
     print("Step 3: Setting up SBERT recall")
     print("=" * 60)
 
-    sbert = SBERTRecall(model_name="all-MiniLM-L6-v2", use_faiss=True)
+    sbert = SBERTRecall(
+        model_name="all-MiniLM-L6-v2",
+        use_faiss=True,
+        use_pretrained=os.environ.get("JOBREC_USE_PRETRAINED_SBERT", "0") == "1",
+    )
 
     # 添加用户简历编码
     for user in data.users:
@@ -159,9 +174,15 @@ def setup_skill_coverage_calculator(data):
     print("=" * 60)
 
     # --- Build mock KG data from the demo's skills/jobs ---
-    skills_list = [{"name": s.id, "display_name": s.name, "level": 1, "domain": s.category} for s in data.skills]
+    skills_list = [
+        {"name": s.id, "display_name": s.name, "level": 1, "domain": s.category}
+        for s in data.skills
+    ]
 
-    prereqs = _generate_prerequisites()
+    prereqs = [
+        (relation.source_skill_id, relation.target_skill_id, relation.confidence)
+        for relation in data.skill_relations
+    ]
     job_associations = _build_job_associations(data.jobs)
 
     kg_data = {
@@ -174,8 +195,9 @@ def setup_skill_coverage_calculator(data):
     weighter = GATSkillWeighter(kg_data=kg_data, num_features=16)
 
     print("\n[GAT] Training with pseudo-labels...")
-    history = weighter.train(n_epochs=100, lr=1e-3, weight_decay=1e-4,
-                             device="cpu", verbose=True)
+    history = weighter.train(
+        n_epochs=100, lr=1e-3, weight_decay=1e-4, device="cpu", verbose=True
+    )
     print(f"[GAT] Best training loss: {min(history['loss']):.4f}")
 
     # --- Show top-k skills by GAT importance ---
@@ -236,7 +258,6 @@ def _generate_prerequisites():
 
 def _build_job_associations(jobs):
     """Build {job_id: [skill_names]} mapping from mock jobs."""
-    from data.models import Skill
     associations = {}
     for job in jobs:
         skill_names = list(job.required_skills.keys())
@@ -266,12 +287,15 @@ def demonstrate_recall_pipeline(data, lightgcn_model, data_loader, sbert_recall)
 
     # 将 scipy 稀疏邻接矩阵转换为 PyTorch 稀疏张量
     adj_matrix = data_loader.get_sparse_graph()
+    import numpy as np
     import torch
+
     coo = adj_matrix.tocoo()
     adj_tensor = torch.sparse_coo_tensor(
-        torch.tensor([coo.row, coo.col], dtype=torch.long),
+        torch.tensor(np.vstack([coo.row, coo.col]), dtype=torch.long),
         torch.tensor(coo.data, dtype=torch.float),
-        coo.shape
+        coo.shape,
+        check_invariants=True,
     ).coalesce()
 
     # 前向传播获取嵌入向量
@@ -283,9 +307,9 @@ def demonstrate_recall_pipeline(data, lightgcn_model, data_loader, sbert_recall)
     ensemble = EnsembleRecall(
         lightgcn_model=lightgcn_model,
         sbert_recall=sbert_recall,
-        lightgcn_weight=0.7,    # 协同过滤权重 (文档 §6.2)
-        sbert_weight=0.3,       # 语义匹配权重
-        fusion_method="weighted_sum"
+        lightgcn_weight=0.7,  # 协同过滤权重 (文档 §6.2)
+        sbert_weight=0.3,  # 语义匹配权重
+        fusion_method="weighted_sum",
     )
 
     # 以第一个用户为例测试召回效果
@@ -299,7 +323,7 @@ def demonstrate_recall_pipeline(data, lightgcn_model, data_loader, sbert_recall)
             user_idx=user_idx,
             user_embeddings=user_embeddings,
             item_embeddings=item_embeddings,
-            k=5
+            k=5,
         )
 
         # 将内部索引转换为岗位 ID
@@ -314,9 +338,15 @@ def demonstrate_recall_pipeline(data, lightgcn_model, data_loader, sbert_recall)
     return ensemble
 
 
-def demonstrate_ranking_pipeline(data, ensemble_recall, skill_calculator,
-                                 data_loader, lightgcn_model, sbert_recall,
-                                 gat_weighter=None):
+def demonstrate_ranking_pipeline(
+    data,
+    ensemble_recall,
+    skill_calculator,
+    data_loader,
+    lightgcn_model,
+    sbert_recall,
+    gat_weighter=None,
+):
     """演示排序管线的运行流程。
 
     使用 LinearFusionRanker 将多路召回信号（图相似度、语义相似度、技能覆盖率）
@@ -334,11 +364,11 @@ def demonstrate_ranking_pipeline(data, ensemble_recall, skill_calculator,
     # 创建排序器，设置三路信号的默认权重
     ranker = LinearFusionRanker(
         weights={
-            'lightgcn_score': 0.4,    # 协同过滤图相似度
-            'sbert_score': 0.3,       # 语义匹配度
-            'skill_coverage': 0.3     # 技能覆盖率
+            "lightgcn_score": 0.4,  # 协同过滤图相似度
+            "sbert_score": 0.3,  # 语义匹配度
+            "skill_coverage": 0.3,  # 技能覆盖率
         },
-        normalize_scores=True
+        normalize_scores=True,
     )
 
     # 选取样例用户和岗位进行演示
@@ -348,24 +378,30 @@ def demonstrate_ranking_pipeline(data, ensemble_recall, skill_calculator,
     print(f"\nRanking for: {sample_user.name} -> {sample_job.title}")
 
     user_skills = {skill_id: level for skill_id, level in sample_user.skills.items()}
-    job_required = {skill_id: level for skill_id, level in sample_job.required_skills.items()}
-    job_preferred = {skill_id: level for skill_id, level in sample_job.preferred_skills.items()}
+    job_required = {
+        skill_id: level for skill_id, level in sample_job.required_skills.items()
+    }
+    job_preferred = {
+        skill_id: level for skill_id, level in sample_job.preferred_skills.items()
+    }
 
     # --- Uniform coverage ---
     coverage_result = skill_calculator.calculate_coverage(
         user_skills, job_required, job_preferred
     )
-    uniform_cov = coverage_result['coverage_score']
+    uniform_cov = coverage_result["coverage_score"]
     print(f"  Skill coverage (uniform):  {uniform_cov:.2%}")
     print(f"  Missing skills: {len(coverage_result['skill_gap'])}")
 
     # --- GAT-weighted coverage ---
-    gat_cov = coverage_result.get('gat_coverage_score')
+    gat_cov = coverage_result.get("gat_coverage_score")
     if gat_cov is not None:
         print(f"  Skill coverage (GAT):      {gat_cov:.2%}")
         diff = gat_cov - uniform_cov
-        print(f"  GAT delta:                 {diff:+.2%}"
-              f"{' (GAT downweights missing core skills)' if diff < 0 else ''}")
+        print(
+            f"  GAT delta:                 {diff:+.2%}"
+            f"{' (GAT downweights missing core skills)' if diff < 0 else ''}"
+        )
 
     # --- Compare coverage across multiple jobs ---
     test_jobs = data.jobs[:5]
@@ -374,12 +410,16 @@ def demonstrate_ranking_pipeline(data, ensemble_recall, skill_calculator,
     print(f"  {'─' * 30} {'─' * 8} {'─' * 8} {'─' * 8}")
 
     # Compute real LightGCN embeddings and scores for the sample user
+    import numpy as np
     import torch
+
     adj_matrix = data_loader.get_sparse_graph()
     coo = adj_matrix.tocoo()
     adj_tensor = torch.sparse_coo_tensor(
-        torch.tensor([coo.row, coo.col], dtype=torch.long),
-        torch.tensor(coo.data, dtype=torch.float), coo.shape
+        torch.tensor(np.vstack([coo.row, coo.col]), dtype=torch.long),
+        torch.tensor(coo.data, dtype=torch.float),
+        coo.shape,
+        check_invariants=True,
     ).coalesce()
     lightgcn_model.eval()
     with torch.no_grad():
@@ -418,18 +458,20 @@ def demonstrate_ranking_pipeline(data, ensemble_recall, skill_calculator,
         lg_score = (lg_scores_raw[i] - lg_min) / lg_range
         sb_score = (sb_scores_raw[i] - sb_min) / sb_range
 
-        u_cov = result['coverage_score']
-        g_cov = result.get('gat_coverage_score')
+        u_cov = result["coverage_score"]
+        g_cov = result.get("gat_coverage_score")
         rank_cov = g_cov if g_cov is not None else u_cov
 
         delta = (g_cov - u_cov) if g_cov is not None else 0.0
         print(f"  {job.title:<30} {u_cov:8.2%} {g_cov or 0:8.2%} {delta:>+8.2%}")
 
-        ranking_inputs.append(RankingFeatures(
-            lightgcn_score=lg_score,
-            sbert_score=sb_score,
-            skill_coverage=rank_cov,
-        ))
+        ranking_inputs.append(
+            RankingFeatures(
+                lightgcn_score=lg_score,
+                sbert_score=sb_score,
+                skill_coverage=rank_cov,
+            )
+        )
 
     # --- Run ranking ---
     sorted_indices = ranker.rank(ranking_inputs)
@@ -469,9 +511,7 @@ def demonstrate_generation_pipeline(data):
 
     # 创建 LLM 模拟器（使用 qwen-2.5-simulated）
     llm_simulator = LLMSimulator(
-        model_name="qwen-2.5-simulated",
-        temperature=0.3,
-        max_tokens=1000
+        model_name="qwen-2.5-simulated", temperature=0.3, max_tokens=1000
     )
 
     # 创建 LangGraph 工作流
@@ -501,7 +541,9 @@ def demonstrate_generation_pipeline(data):
         print(f"\nLearning path ({len(result_state.learning_path)} items):")
         for item in result_state.learning_path[:2]:  # 仅展示前两条
             if isinstance(item, dict):
-                print(f"  - {item.get('skill_id', 'Unknown')}: {item.get('estimated_time', 'N/A')}")
+                print(
+                    f"  - {item.get('skill_id', 'Unknown')}: {item.get('estimated_time', 'N/A')}"
+                )
 
     return workflow
 
@@ -540,12 +582,20 @@ def run_complete_demo():
     skill_calculator, gat_weighter = setup_skill_coverage_calculator(data)
 
     # 第 5 步：演示召回融合
-    ensemble_recall = demonstrate_recall_pipeline(data, lightgcn_model, data_loader, sbert_recall)
+    ensemble_recall = demonstrate_recall_pipeline(
+        data, lightgcn_model, data_loader, sbert_recall
+    )
 
     # 第 6 步：演示排序管线（含 GAT 加权覆盖率对比）
-    ranker = demonstrate_ranking_pipeline(data, ensemble_recall, skill_calculator,
-                                          data_loader, lightgcn_model, sbert_recall,
-                                          gat_weighter)
+    ranker = demonstrate_ranking_pipeline(
+        data,
+        ensemble_recall,
+        skill_calculator,
+        data_loader,
+        lightgcn_model,
+        sbert_recall,
+        gat_weighter,
+    )
 
     # 第 7 步：演示生成管线
     workflow = demonstrate_generation_pipeline(data)
@@ -566,13 +616,13 @@ def run_complete_demo():
     print("\nAll components are working together in a modular architecture.")
 
     return {
-        'data': data,
-        'lightgcn_model': lightgcn_model,
-        'sbert_recall': sbert_recall,
-        'ensemble_recall': ensemble_recall,
-        'ranker': ranker,
-        'workflow': workflow,
-        'gat_weighter': gat_weighter,
+        "data": data,
+        "lightgcn_model": lightgcn_model,
+        "sbert_recall": sbert_recall,
+        "ensemble_recall": ensemble_recall,
+        "ranker": ranker,
+        "workflow": workflow,
+        "gat_weighter": gat_weighter,
     }
 
 
@@ -583,31 +633,35 @@ if __name__ == "__main__":
 
         # 保存实验结果（剔除不可序列化的大对象）
         import pickle
+
         with open("results/demo_results.pkl", "wb") as f:
             save_results = {
-                'data_stats': {
-                    'n_users': len(results['data'].users),
-                    'n_jobs': len(results['data'].jobs),
-                    'n_skills': len(results['data'].skills)
+                "data_stats": {
+                    "n_users": len(results["data"].users),
+                    "n_jobs": len(results["data"].jobs),
+                    "n_skills": len(results["data"].skills),
                 },
-                'model_info': {
-                    'lightgcn_params': sum(p.numel() for p in results['lightgcn_model'].parameters()),
-                    'sbert_stats': results['sbert_recall'].get_embedding_stats()
-                }
+                "model_info": {
+                    "lightgcn_params": sum(
+                        p.numel() for p in results["lightgcn_model"].parameters()
+                    ),
+                    "sbert_stats": results["sbert_recall"].get_embedding_stats(),
+                },
             }
             pickle.dump(save_results, f)
 
         print("\n📁 Results saved to results/demo_results.pkl")
-        print("\n🎯 System ready for production use with:")
+        print("\n🎯 Verified interview-ready prototype with:")
         print("   - UV package management")
         print("   - Modular architecture")
         print("   - Mock data simulation")
         print("   - Complete training pipeline")
-        print("   - Production-ready components")
+        print("   - Production-shaped components and explicit deployment controls")
 
     except Exception as e:
         # 捕获异常并输出详细堆栈
         print(f"\n❌ Error during demo: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)

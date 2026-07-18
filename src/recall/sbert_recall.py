@@ -1,14 +1,14 @@
-"""
-Semantic recall using Sentence-BERT (SBERT) for cold-start scenarios.
-"""
-import numpy as np
-from typing import List, Dict, Tuple, Optional, Any
-import logging
 import hashlib
+import logging
+import re
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
 
 # Try to import sentence-transformers, but provide fallback for simulation
 try:
     from sentence_transformers import SentenceTransformer
+
     SBERT_AVAILABLE = True
 except ImportError:
     SBERT_AVAILABLE = False
@@ -16,6 +16,7 @@ except ImportError:
 
 try:
     import faiss
+
     FAISS_AVAILABLE = True
 except ImportError:
     FAISS_AVAILABLE = False
@@ -25,10 +26,13 @@ except ImportError:
 class SBERTRecall:
     """Semantic recall using SBERT embeddings."""
 
-    def __init__(self,
-                 model_name: str = "all-MiniLM-L6-v2",
-                 device: str = "cpu",
-                 use_faiss: bool = True):
+    def __init__(
+        self,
+        model_name: str = "all-MiniLM-L6-v2",
+        device: str = "cpu",
+        use_faiss: bool = True,
+        use_pretrained: bool = True,
+    ):
         """
         Initialize SBERT recall model.
 
@@ -36,19 +40,22 @@ class SBERTRecall:
             model_name: Name of SBERT model to use
             device: Device to run model on
             use_faiss: Whether to use Faiss for efficient similarity search
+            use_pretrained: Load the named SentenceTransformer model. Set this
+                to False for a fully offline deterministic feature-hashing
+                encoder with the same retrieval contract.
         """
         self.model_name = model_name
         self.device = device
         self.use_faiss = use_faiss and FAISS_AVAILABLE
 
         # Initialize model
-        if SBERT_AVAILABLE:
+        self.use_pretrained = use_pretrained
+        if SBERT_AVAILABLE and use_pretrained:
             self.model = SentenceTransformer(model_name, device=device)
             self.embedding_dim = self.model.get_sentence_embedding_dimension()
         else:
-            # Simulate model with random embeddings
             self.model = None
-            self.embedding_dim = 384  # Typical MiniLM dimension
+            self.embedding_dim = 384
 
         # Storage for embeddings
         self.user_embeddings: Dict[str, np.ndarray] = {}
@@ -63,16 +70,22 @@ class SBERTRecall:
         if self.model is not None:
             # Use real SBERT model
             embedding = self.model.encode(text, convert_to_numpy=True)
-            return embedding
+            embedding = np.asarray(embedding, dtype=np.float32)
+            norm = np.linalg.norm(embedding)
+            return embedding / norm if norm > 0 else embedding
         else:
-            # Simulate embedding (deterministic from text hash)
-            # In a real system, this would be actual SBERT embeddings
-            seed_bytes = hashlib.sha256(text.encode("utf-8")).digest()[:4]
-            seed = int.from_bytes(seed_bytes, byteorder="little", signed=False)
-            rng = np.random.default_rng(seed)
-            embedding = rng.standard_normal(self.embedding_dim, dtype=np.float32)
-            embedding = embedding / np.linalg.norm(embedding)  # Normalize
-            return embedding
+            # Signed feature hashing preserves lexical overlap and is stable
+            # across processes, unlike Python's built-in hash(). It is an
+            # explicit offline baseline, not a claim of pretrained semantics.
+            embedding = np.zeros(self.embedding_dim, dtype=np.float32)
+            tokens = re.findall(r"[a-z0-9+#.]+", text.casefold())
+            for token in tokens:
+                digest = hashlib.sha256(token.encode("utf-8")).digest()
+                index = int.from_bytes(digest[:4], "little") % self.embedding_dim
+                sign = 1.0 if digest[4] & 1 else -1.0
+                embedding[index] += sign
+            norm = np.linalg.norm(embedding)
+            return embedding / norm if norm > 0 else embedding
 
     def add_user(self, user_id: str, resume_text: str) -> None:
         """Add user with resume text."""
@@ -94,12 +107,16 @@ class SBERTRecall:
             return
 
         self.job_ids = list(self.job_embeddings.keys())
-        embeddings = np.array([self.job_embeddings[jid] for jid in self.job_ids], dtype=np.float32)
+        embeddings = np.array(
+            [self.job_embeddings[jid] for jid in self.job_ids], dtype=np.float32
+        )
 
         # Create or update index
         if self.faiss_index is None:
             # Create new index
-            self.faiss_index = faiss.IndexFlatIP(self.embedding_dim)  # Inner product for cosine similarity
+            self.faiss_index = faiss.IndexFlatIP(
+                self.embedding_dim
+            )  # Inner product for cosine similarity
             self.faiss_index.add(embeddings)
         else:
             # Rebuild index (simplified - in production would use incremental updates)
@@ -115,13 +132,14 @@ class SBERTRecall:
         job_vec = self.job_embeddings[job_id]
 
         # Cosine similarity
-        similarity = np.dot(user_vec, job_vec) / (np.linalg.norm(user_vec) * np.linalg.norm(job_vec))
+        similarity = np.dot(user_vec, job_vec) / (
+            np.linalg.norm(user_vec) * np.linalg.norm(job_vec)
+        )
         return float(similarity)
 
-    def recommend_for_user(self,
-                          user_id: str,
-                          k: int = 10,
-                          job_ids: Optional[List[str]] = None) -> List[Tuple[str, float]]:
+    def recommend_for_user(
+        self, user_id: str, k: int = 10, job_ids: Optional[List[str]] = None
+    ) -> List[Tuple[str, float]]:
         """
         Recommend jobs for a user based on semantic similarity.
 
@@ -136,15 +154,44 @@ class SBERTRecall:
         if user_id not in self.user_embeddings:
             return []
 
-        user_vec = self.user_embeddings[user_id].reshape(1, -1).astype(np.float32)
+        return self.recommend_for_embedding(self.user_embeddings[user_id], k, job_ids)
+
+    def recommend_for_text(
+        self, resume_text: str, k: int = 10, job_ids: Optional[List[str]] = None
+    ) -> List[Tuple[str, float]]:
+        """Recommend for a request-scoped resume without mutating shared state."""
+        if not resume_text or not resume_text.strip():
+            return []
+        return self.recommend_for_embedding(self.encode_text(resume_text), k, job_ids)
+
+    def recommend_for_embedding(
+        self,
+        user_embedding: np.ndarray,
+        k: int = 10,
+        job_ids: Optional[List[str]] = None,
+    ) -> List[Tuple[str, float]]:
+        """Retrieve jobs for a normalized embedding vector."""
+        user_vec = np.asarray(user_embedding, dtype=np.float32).reshape(1, -1)
+        norm = np.linalg.norm(user_vec)
+        if norm == 0:
+            return []
+        user_vec = user_vec / norm
 
         # Get job IDs to consider
         if job_ids is None:
             job_ids = list(self.job_embeddings.keys())
-            embeddings = np.array([self.job_embeddings[jid] for jid in job_ids], dtype=np.float32)
+            embeddings = np.array(
+                [self.job_embeddings[jid] for jid in job_ids], dtype=np.float32
+            )
         else:
-            embeddings = np.array([self.job_embeddings[jid] for jid in job_ids if jid in self.job_embeddings],
-                                 dtype=np.float32)
+            embeddings = np.array(
+                [
+                    self.job_embeddings[jid]
+                    for jid in job_ids
+                    if jid in self.job_embeddings
+                ],
+                dtype=np.float32,
+            )
             # Filter job_ids to those with embeddings
             job_ids = [jid for jid in job_ids if jid in self.job_embeddings]
 
@@ -168,7 +215,8 @@ class SBERTRecall:
             for job_id in job_ids:
                 job_vec = self.job_embeddings[job_id]
                 similarity = np.dot(user_vec.flatten(), job_vec) / (
-                    np.linalg.norm(user_vec) * np.linalg.norm(job_vec))
+                    np.linalg.norm(user_vec) * np.linalg.norm(job_vec)
+                )
                 similarities.append((job_id, float(similarity)))
 
             # Sort by similarity descending
@@ -176,10 +224,9 @@ class SBERTRecall:
 
             return similarities[:k]
 
-    def batch_recommend(self,
-                       user_ids: List[str],
-                       k: int = 10,
-                       job_ids: Optional[List[str]] = None) -> Dict[str, List[Tuple[str, float]]]:
+    def batch_recommend(
+        self, user_ids: List[str], k: int = 10, job_ids: Optional[List[str]] = None
+    ) -> Dict[str, List[Tuple[str, float]]]:
         """Recommend jobs for multiple users."""
         results = {}
         for user_id in user_ids:
@@ -193,39 +240,47 @@ class SBERTRecall:
             "n_jobs": len(self.job_embeddings),
             "embedding_dim": self.embedding_dim,
             "using_faiss": self.use_faiss and self.faiss_index is not None,
+            "encoder": (
+                "sentence_transformer" if self.model is not None else "feature_hashing"
+            ),
             "sbert_available": SBERT_AVAILABLE,
-            "faiss_available": FAISS_AVAILABLE
+            "faiss_available": FAISS_AVAILABLE,
         }
 
     def save_embeddings(self, path: str) -> None:
         """Save embeddings to disk."""
         import pickle
+
         data = {
-            'user_embeddings': self.user_embeddings,
-            'job_embeddings': self.job_embeddings,
-            'job_ids': self.job_ids,
-            'embedding_dim': self.embedding_dim,
-            'model_name': self.model_name
+            "user_embeddings": self.user_embeddings,
+            "job_embeddings": self.job_embeddings,
+            "job_ids": self.job_ids,
+            "embedding_dim": self.embedding_dim,
+            "model_name": self.model_name,
         }
-        with open(path, 'wb') as f:
+        with open(path, "wb") as f:
             pickle.dump(data, f)
 
     def load_embeddings(self, path: str) -> None:
         """Load embeddings from disk. Reinitializes the SBERT model for new encodings."""
         import pickle
-        with open(path, 'rb') as f:
+
+        with open(path, "rb") as f:
             data = pickle.load(f)
 
-        self.user_embeddings = data['user_embeddings']
-        self.job_embeddings = data['job_embeddings']
-        self.job_ids = data['job_ids']
-        self.embedding_dim = data['embedding_dim']
-        self.model_name = data['model_name']
+        self.user_embeddings = data["user_embeddings"]
+        self.job_embeddings = data["job_embeddings"]
+        self.job_ids = data["job_ids"]
+        self.embedding_dim = data["embedding_dim"]
+        self.model_name = data["model_name"]
 
         # Reinitialize the SBERT model for future encodings
         try:
             from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer(self.model_name)
+
+            self.model = (
+                SentenceTransformer(self.model_name) if self.use_pretrained else None
+            )
         except ImportError:
             self.model = None
 

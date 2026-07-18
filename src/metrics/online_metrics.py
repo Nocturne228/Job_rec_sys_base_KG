@@ -16,28 +16,31 @@ import json
 import math
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Any
 from datetime import datetime
 from enum import Enum
+from typing import Any, Dict, List, Optional, Set
 
+from scipy import stats
 
 # ============================================================================
 # Event types
 # ============================================================================
 
+
 class ActionType(str, Enum):
-    IMPRESSION = "impression"   # Job shown in recommendation list
-    CLICK      = "click"        # User clicked job detail
-    APPLY      = "apply"        # User submitted application
+    IMPRESSION = "impression"  # Job shown in recommendation list
+    CLICK = "click"  # User clicked job detail
+    APPLY = "apply"  # User submitted application
 
 
 @dataclass
 class InteractionEvent:
     """Single user interaction event."""
+
     user_id: str
     job_id: str
     action: ActionType
-    group: str = "B"          # "A" = control, "B" = treatment
+    group: str = "B"  # "A" = control, "B" = treatment
     timestamp: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -49,6 +52,7 @@ class InteractionEvent:
 # ============================================================================
 # Collector
 # ============================================================================
+
 
 class OnlineMetricsCollector:
     """
@@ -66,31 +70,46 @@ class OnlineMetricsCollector:
         self.start_time: str = datetime.now().isoformat()
 
         # Per-group counters
-        self._impressions: Dict[str, Set[str]] = {"A": set(), "B": set()}     # (user_id, job_id) pairs
-        self._clicks: Dict[str, Set[str]] = {"A": set(), "B": set()}
-        self._applies: Dict[str, Set[str]] = {"A": set(), "B": set()}
-        self._active_users: Dict[str, Set[str]] = {"A": set(), "B": set()}     # users who clicked
-        self._apply_users: Dict[str, Set[str]] = {"A": set(), "B": set()}      # users who applied
+        self._impressions: Dict[str, List[tuple]] = {"A": [], "B": []}
+        self._clicks: Dict[str, List[tuple]] = {"A": [], "B": []}
+        self._applies: Dict[str, List[tuple]] = {"A": [], "B": []}
+        self._active_users: Dict[str, Set[str]] = {
+            "A": set(),
+            "B": set(),
+        }  # users who clicked
+        self._apply_users: Dict[str, Set[str]] = {
+            "A": set(),
+            "B": set(),
+        }  # users who applied
 
     # ----- recording -----
 
-    def record(self, user_id: str, job_id: str, action: ActionType,
-               group: str = "B", metadata: Optional[Dict[str, Any]] = None):
+    def record(
+        self,
+        user_id: str,
+        job_id: str,
+        action: ActionType,
+        group: str = "B",
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
         """Record a single interaction event."""
         event = InteractionEvent(
-            user_id=user_id, job_id=job_id, action=action,
-            group=group, metadata=metadata or {}
+            user_id=user_id,
+            job_id=job_id,
+            action=action,
+            group=group,
+            metadata=metadata or {},
         )
         self.events.append(event)
         pair = (user_id, job_id)
         grp = event.group
         if action == ActionType.IMPRESSION:
-            self._impressions[grp].add(pair)
+            self._impressions[grp].append(pair)
         elif action == ActionType.CLICK:
-            self._clicks[grp].add(pair)
+            self._clicks[grp].append(pair)
             self._active_users[grp].add(user_id)
         elif action == ActionType.APPLY:
-            self._applies[grp].add(pair)
+            self._applies[grp].append(pair)
             self._apply_users[grp].add(user_id)
 
     # ----- metric calculations -----
@@ -167,7 +186,10 @@ class OnlineMetricsCollector:
         n_b = b_stats.get("impressions", 1)
         p_a = a_val
         p_b = b_val
-        se = math.sqrt(p_a * (1 - p_a) / max(n_a, 1) + p_b * (1 - p_b) / max(n_b, 1)) + 1e-12
+        se = (
+            math.sqrt(p_a * (1 - p_a) / max(n_a, 1) + p_b * (1 - p_b) / max(n_b, 1))
+            + 1e-12
+        )
         z = delta / se
         # Two-tailed p-value approximation using normal CDF (no scipy needed)
         p_value = 2 * (1 - _normal_cdf(abs(z)))
@@ -198,14 +220,36 @@ class OnlineMetricsCollector:
         }
         return report
 
+    def sample_ratio_mismatch(self, expected_a: float = 0.5) -> Dict[str, float | bool]:
+        """Chi-square SRM guard based on unique exposed users."""
+        a = len({user for user, _ in self._impressions["A"]})
+        b = len({user for user, _ in self._impressions["B"]})
+        total = a + b
+        if total == 0:
+            return {"chi_square": 0.0, "p_value": 1.0, "mismatch": False}
+        expected = [total * expected_a, total * (1 - expected_a)]
+        chi_square, p_value = stats.chisquare([a, b], expected)
+        return {
+            "chi_square": float(chi_square),
+            "p_value": float(p_value),
+            "mismatch": bool(p_value < 0.01),
+        }
+
 
 # ============================================================================
 # Convenience helpers
 # ============================================================================
 
+
 def _normal_cdf(x: float) -> float:
     """Approximation of the standard normal CDF using Abramowitz & Stegun."""
-    a1, a2, a3, a4, a5 = 0.254829592, -0.284496736, 1.421413741, -1.453152027, 1.061405429
+    a1, a2, a3, a4, a5 = (
+        0.254829592,
+        -0.284496736,
+        1.421413741,
+        -1.453152027,
+        1.061405429,
+    )
     p = 0.3275911
     sign = 1 if x >= 0 else -1
     x = abs(x) / math.sqrt(2)

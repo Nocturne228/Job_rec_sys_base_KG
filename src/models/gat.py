@@ -17,16 +17,17 @@ References:
 """
 
 import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import add_remaining_self_loops, softmax
 
-
 # ============================================================================
 # Single-Head Graph Attention Layer
 # ============================================================================
+
 
 class GATLayer(MessagePassing):
     """
@@ -45,8 +46,10 @@ class GATLayer(MessagePassing):
         dropout: attention dropout rate (default 0.6)
     """
 
-    def __init__(self, in_dim, out_dim, edge_attr_dim=16, negative_slope=0.2, dropout=0.6):
-        super(GATLayer, self).__init__(aggr='add', flow='source_to_target')
+    def __init__(
+        self, in_dim, out_dim, edge_attr_dim=16, negative_slope=0.2, dropout=0.6
+    ):
+        super(GATLayer, self).__init__(aggr="add", flow="source_to_target")
         self.in_dim = in_dim
         self.out_dim = out_dim
         self.edge_attr_dim = edge_attr_dim
@@ -104,7 +107,9 @@ class GATLayer(MessagePassing):
         # Concatenate target + source + edge features
         if edge_attr is not None:
             edge_proj = torch.matmul(edge_attr, self.W_edge)
-            cat = torch.cat([x_i, x_j, edge_proj], dim=-1)  # [num_edges, 2*out_dim + edge_attr_dim]
+            cat = torch.cat(
+                [x_i, x_j, edge_proj], dim=-1
+            )  # [num_edges, 2*out_dim + edge_attr_dim]
         else:
             cat = torch.cat([x_i, x_j], dim=-1)  # [num_edges, 2*out_dim]
 
@@ -121,12 +126,13 @@ class GATLayer(MessagePassing):
         return x_j * alpha.unsqueeze(-1)
 
     def __repr__(self):
-        return f'{self.__class__.__name__}({self.in_dim} → {self.out_dim})'
+        return f"{self.__class__.__name__}({self.in_dim} → {self.out_dim})"
 
 
 # ============================================================================
 # Multi-Head Graph Attention Layer
 # ============================================================================
+
 
 class MultiHeadGATLayer(nn.Module):
     """
@@ -147,8 +153,17 @@ class MultiHeadGATLayer(nn.Module):
         concat_heads: if True, concat all heads; if False, average them
     """
 
-    def __init__(self, in_dim, hid_dim, out_dim, num_heads=4, edge_attr_dim=16,
-                 negative_slope=0.2, dropout=0.6, concat_heads=True):
+    def __init__(
+        self,
+        in_dim,
+        hid_dim,
+        out_dim,
+        num_heads=4,
+        edge_attr_dim=16,
+        negative_slope=0.2,
+        dropout=0.6,
+        concat_heads=True,
+    ):
         super(MultiHeadGATLayer, self).__init__()
         self.num_heads = num_heads
         self.concat_heads = concat_heads
@@ -156,10 +171,12 @@ class MultiHeadGATLayer(nn.Module):
         # All heads share the same input dimension — this is the core design
         # of multi-head attention: parallel heads operating on identical input,
         # then concatenated/averaged at the output side.
-        self.heads = nn.ModuleList([
-            GATLayer(in_dim, hid_dim, edge_attr_dim, negative_slope, dropout)
-            for _ in range(num_heads)
-        ])
+        self.heads = nn.ModuleList(
+            [
+                GATLayer(in_dim, hid_dim, edge_attr_dim, negative_slope, dropout)
+                for _ in range(num_heads)
+            ]
+        )
 
         if concat_heads:
             self.proj = nn.Linear(hid_dim * num_heads, out_dim)
@@ -181,8 +198,7 @@ class MultiHeadGATLayer(nn.Module):
         else:
             # Average: each head outputs [num_nodes, hid_dim], stack then mean
             outs = torch.stack(
-                [head(x, edge_index, edge_attr) for head in self.heads],
-                dim=0
+                [head(x, edge_index, edge_attr) for head in self.heads], dim=0
             )
             out = outs.mean(dim=0)
 
@@ -193,6 +209,7 @@ class MultiHeadGATLayer(nn.Module):
 # ============================================================================
 # Full GAT for Skill Node Importance
 # ============================================================================
+
 
 class GraphAttentionNetwork(nn.Module):
     """
@@ -215,8 +232,14 @@ class GraphAttentionNetwork(nn.Module):
         dropout: attention dropout rate (default 0.6)
     """
 
-    def __init__(self, num_skill_features=16, hidden_dim=32, num_heads=4,
-                 edge_attr_dim=16, dropout=0.6):
+    def __init__(
+        self,
+        num_skill_features=16,
+        hidden_dim=32,
+        num_heads=4,
+        edge_attr_dim=16,
+        dropout=0.6,
+    ):
         super(GraphAttentionNetwork, self).__init__()
 
         self.num_skill_features = num_skill_features
@@ -231,7 +254,7 @@ class GraphAttentionNetwork(nn.Module):
             num_heads=num_heads,
             edge_attr_dim=edge_attr_dim,
             dropout=dropout,
-            concat_heads=True
+            concat_heads=True,
         )
 
         # Layer 2: Single-head GAT (averaging) for final score
@@ -242,7 +265,7 @@ class GraphAttentionNetwork(nn.Module):
             num_heads=1,
             edge_attr_dim=edge_attr_dim,
             dropout=dropout,
-            concat_heads=False  # Average for stability
+            concat_heads=False,  # Average for stability
         )
 
         self.dropout = dropout
@@ -296,11 +319,17 @@ class GraphAttentionNetwork(nn.Module):
         attention_dict = {}
         for head_idx, head in enumerate(self.gat1.heads):
             # Recompute attention scores (same logic as message())
-            cat = self._assemble_cat(x_transformed[head_idx], edge_index, x, edge_attr, head)
-            e = F.leaky_relu(torch.matmul(cat, head.att).squeeze(-1), head.negative_slope)
+            cat = self._assemble_cat(
+                x_transformed[head_idx], edge_index, x, edge_attr, head
+            )
+            e = F.leaky_relu(
+                torch.matmul(cat, head.att).squeeze(-1), head.negative_slope
+            )
 
             # Store raw attention scores for this head
-            for idx, (i, j) in enumerate(zip(edge_index[1].tolist(), edge_index[0].tolist())):
+            for idx, (i, j) in enumerate(
+                zip(edge_index[1].tolist(), edge_index[0].tolist())
+            ):
                 key = (i, j, head_idx)
                 attention_dict[key] = torch.sigmoid(e[idx]).item()
 
@@ -353,10 +382,18 @@ class GraphAttentionNetwork(nn.Module):
 
         return bpr
 
-    def train_with_pseudo_labels(self, x, edge_index, edge_attr,
-                                 pseudo_labels, n_epochs=200,
-                                 lr=1e-3, weight_decay=1e-4,
-                                 device="cpu", verbose=True):
+    def train_with_pseudo_labels(
+        self,
+        x,
+        edge_index,
+        edge_attr,
+        pseudo_labels,
+        n_epochs=200,
+        lr=1e-3,
+        weight_decay=1e-4,
+        device="cpu",
+        verbose=True,
+    ):
         """
         Train GAT using pseudo-labels derived from graph centrality + job frequency.
 
@@ -419,9 +456,11 @@ class GraphAttentionNetwork(nn.Module):
                 best_state = {k: v.clone() for k, v in self.state_dict().items()}
 
             if verbose and (epoch + 1) % 50 == 0:
-                print(f"  [GAT] Epoch {epoch+1}/{n_epochs}, "
-                      f"Loss={total_loss.item():.4f} (MSE={mse.item():.4f}, "
-                      f"Reg={reg.item():.4f})")
+                print(
+                    f"  [GAT] Epoch {epoch+1}/{n_epochs}, "
+                    f"Loss={total_loss.item():.4f} (MSE={mse.item():.4f}, "
+                    f"Reg={reg.item():.4f})"
+                )
 
         # Restore best weights
         if best_state is not None:
@@ -437,6 +476,7 @@ class GraphAttentionNetwork(nn.Module):
 # ============================================================================
 # Skill Node Feature Builder
 # ============================================================================
+
 
 class SkillFeatureBuilder:
     """
@@ -567,8 +607,10 @@ class SkillFeatureBuilder:
             pr = [1.0 / n] * n
             damping = 0.85
             for _ in range(50):
-                new_pr = [damping * pr[j] / out_counts[j] if out_counts[j] > 0 else 0.0
-                          for j in range(n)]
+                new_pr = [
+                    damping * pr[j] / out_counts[j] if out_counts[j] > 0 else 0.0
+                    for j in range(n)
+                ]
                 pr_next = [0.0] * n
                 for s_val, d_val in zip(edge_list_src, edge_list_dst):
                     pr_next[d_val] += new_pr[s_val]
@@ -588,8 +630,9 @@ class SkillFeatureBuilder:
         # --- Feature matrix ---
         x = torch.zeros(n_skills, self.num_features)
         # Build skill category lookup: domain → lower-case string
-        skill_category = {s["name"]: s.get("domain", "programming").lower()
-                          for s in skills}
+        skill_category = {
+            s["name"]: s.get("domain", "programming").lower() for s in skills
+        }
 
         for skill_name, idx in skill_id_map.items():
             freq = skill_freq[skill_name]
@@ -603,11 +646,11 @@ class SkillFeatureBuilder:
             # Frequency split by relation type: skills that are more often "required"
             # vs "nice-to-have" — proxy: normalize in-degree vs out-degree ratio
             total_deg = ind + opd
-            x[idx, 2] = ind / max_in       # in-degree as "prerequisite fan-in"
-            x[idx, 3] = opd / max_out       # out-degree as "prerequisite fan-out"
+            x[idx, 2] = ind / max_in  # in-degree as "prerequisite fan-in"
+            x[idx, 3] = opd / max_out  # out-degree as "prerequisite fan-out"
 
             # [4:8] Centrality Scores (PageRank + betweenness proxy + variants)
-            x[idx, 4] = pr[idx] / max_pr     # Normalized PageRank
+            x[idx, 4] = pr[idx] / max_pr  # Normalized PageRank
             x[idx, 5] = (ind + opd) / max_total_deg  # Degree centrality
             # Harmonic centrality proxy: skills with balanced in/out are more central
             if ind + opd > 0:
@@ -628,7 +671,9 @@ class SkillFeatureBuilder:
             x[idx, 10] = base_trend
             # Emerging skills proxy: high degree / high frequency but not yet ubiquitous
             x[idx, 11] = min(base_trend * x[idx, 4], 1.0)  # trend × PR interaction
-            x[idx, 12] = x[idx, 2] * (1.0 - x[idx, 0])  # in-degree × (1-freq) → emerging
+            x[idx, 12] = x[idx, 2] * (
+                1.0 - x[idx, 0]
+            )  # in-degree × (1-freq) → emerging
             x[idx, 13] = base_trend * 0.5  # baseline SO mention proxy
 
             # [14:16] Salary Correlation (category impact + interaction)

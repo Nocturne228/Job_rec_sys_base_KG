@@ -17,35 +17,35 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any, Callable
-
+from typing import Any, Callable, Dict, List, Optional
 
 # ============================================================================
 # Evaluation criteria
 # ============================================================================
 
 _EVAL_DIMENSIONS = [
-    "relevance",      # Does it address user's skill gaps?
-    "feasibility",    # Are the recommendations actionable?
+    "relevance",  # Does it address user's skill gaps?
+    "feasibility",  # Are the recommendations actionable?
     "hallucination",  # Does it contain non-existent resources? (lower = better)
-    "format",         # Is the output valid structured JSON?
-    "specificity",    # Does it give specific resources / timelines?
+    "format",  # Is the output valid structured JSON?
+    "specificity",  # Does it give specific resources / timelines?
 ]
 
 
 @dataclass
 class EvaluationCriteria:
     """Scoring rubric for each dimension."""
+
     dimension: str
     weight: float
     description: str
 
 
 DEFAULT_CRITERIA: List[EvaluationCriteria] = [
-    EvaluationCriteria("relevance",   0.30, "Addresses user's skill gaps"),
+    EvaluationCriteria("relevance", 0.30, "Addresses user's skill gaps"),
     EvaluationCriteria("feasibility", 0.25, "Recommendations are actionable"),
     EvaluationCriteria("hallucination", 0.20, "No non-existent resources"),
-    EvaluationCriteria("format",      0.15, "Valid JSON with required fields"),
+    EvaluationCriteria("format", 0.15, "Valid JSON with required fields"),
     EvaluationCriteria("specificity", 0.10, "Specific resources and timelines"),
 ]
 
@@ -53,17 +53,19 @@ DEFAULT_CRITERIA: List[EvaluationCriteria] = [
 @dataclass
 class EvalResult:
     """Evaluation result for a single generated output."""
+
     user_id: str
     job_id: str
     scores: Dict[str, float] = field(default_factory=dict)
     weighted_score: float = 0.0
-    flagged: bool = False         # hallucination score > threshold
+    flagged: bool = False  # hallucination score > threshold
     notes: str = ""
 
 
 # ============================================================================
 # Rule-based evaluator (no external LLM needed)
 # ============================================================================
+
 
 class RuleBasedScorer:
     """Fast heuristic scorer without external LLM API calls."""
@@ -93,8 +95,17 @@ class RuleBasedScorer:
     @staticmethod
     def score_feasibility(response: str) -> float:
         """0-1: contains concrete action items (courses, docs, timeframes)."""
-        indicators = ["course", "tutorial", "documentation", "practice",
-                      "project", "month", "week", "learn", "study"]
+        indicators = [
+            "course",
+            "tutorial",
+            "documentation",
+            "practice",
+            "project",
+            "month",
+            "week",
+            "learn",
+            "study",
+        ]
         text = response.lower()
         count = sum(1 for ind in indicators if ind in text)
         return min(count / max(len(indicators), 1), 1.0)
@@ -103,19 +114,28 @@ class RuleBasedScorer:
     def score_hallucination(response: str) -> float:
         """0-1: lower is better. Penalizes URL patterns, fabricated stats."""
         # Simple heuristics: URLs and very specific numbers suggest hallucination
-        url_count = len(re.findall(r'https?://\S+', response))
-        stat_patterns = re.findall(r'\d{2,3}%', response)
+        url_count = len(re.findall(r"https?://\S+", response))
+        stat_patterns = re.findall(r"\d{2,3}%", response)
         score = min(1.0, (url_count * 0.3 + len(stat_patterns) * 0.2))
         return score
 
     @staticmethod
     def score_specificity(response: str) -> float:
         """0-1: contains named resources, concrete timelines."""
-        has_timeline = bool(re.search(r'\d+[- ]?(week|month|day)', response, re.I))
-        has_resources = bool(re.search(r'(course|tutorial|book|docs|udemy|coursera|fast\.ai)',
-                                       response, re.I))
-        has_skills_mention = bool(re.search(r'[A-Z][a-z]+(?:\s[A-Z][a-z]+)*(?:\s\d+\.?\d*)?', response))
-        score = (0.4 * int(has_timeline) + 0.4 * int(has_resources) + 0.2 * int(has_skills_mention))
+        has_timeline = bool(re.search(r"\d+[- ]?(week|month|day)", response, re.I))
+        has_resources = bool(
+            re.search(
+                r"(course|tutorial|book|docs|udemy|coursera|fast\.ai)", response, re.I
+            )
+        )
+        has_skills_mention = bool(
+            re.search(r"[A-Z][a-z]+(?:\s[A-Z][a-z]+)*(?:\s\d+\.?\d*)?", response)
+        )
+        score = (
+            0.4 * int(has_timeline)
+            + 0.4 * int(has_resources)
+            + 0.2 * int(has_skills_mention)
+        )
         return min(score, 1.0)
 
 
@@ -156,12 +176,15 @@ class LLMJudgeEvaluator:
         self.scorer = RuleBasedScorer()
         self._history: List[EvalResult] = []
 
-    def evaluate(self, user_id: str, job_id: str,
-                 response: str,
-                 skill_gaps: Optional[List[str]] = None,
-                 mode: str = "rule",
-                 llm_client: Optional[Callable[[str], str]] = None,
-                 ) -> EvalResult:
+    def evaluate(
+        self,
+        user_id: str,
+        job_id: str,
+        response: str,
+        skill_gaps: Optional[List[str]] = None,
+        mode: str = "rule",
+        llm_client: Optional[Callable[[str], str]] = None,
+    ) -> EvalResult:
         """Evaluate a single generated output."""
         skill_gaps = skill_gaps or []
         scores: Dict[str, float] = {}
@@ -181,8 +204,10 @@ class LLMJudgeEvaluator:
             else:
                 flipped[dim] = val
 
-        weighted = sum(flipped.get(d.dimension, 0) * weights.get(d.dimension, 0)
-                       for d in self.criteria)
+        weighted = sum(
+            flipped.get(d.dimension, 0) * weights.get(d.dimension, 0)
+            for d in self.criteria
+        )
         flagged = scores.get("hallucination", 0) > 0.6
 
         result = EvalResult(
@@ -195,8 +220,9 @@ class LLMJudgeEvaluator:
         self._history.append(result)
         return result
 
-    def batch_evaluate(self, samples: List[Dict[str, Any]],
-                       mode: str = "rule") -> List[EvalResult]:
+    def batch_evaluate(
+        self, samples: List[Dict[str, Any]], mode: str = "rule"
+    ) -> List[EvalResult]:
         """Evaluate multiple samples."""
         results = []
         for s in samples:
@@ -232,8 +258,13 @@ class LLMJudgeEvaluator:
             "flagged_rate": round(flagged_rate, 3),
             "dimension_averages": dim_avgs,
             "json_compliance": round(
-                sum(1 for r in self._history if r.scores.get("format", 0) >= 0.8) / n
-                if n else 0, 3
+                (
+                    sum(1 for r in self._history if r.scores.get("format", 0) >= 0.8)
+                    / n
+                    if n
+                    else 0
+                ),
+                3,
             ),
         }
 
@@ -251,9 +282,9 @@ class LLMJudgeEvaluator:
         }
 
     @staticmethod
-    def _llm_judge(llm_client: Callable[[str], str],
-                    response: str,
-                    skill_gaps: List[str]) -> Dict[str, float]:
+    def _llm_judge(
+        llm_client: Callable[[str], str], response: str, skill_gaps: List[str]
+    ) -> Dict[str, float]:
         """Call external LLM for evaluation. Returns scores {dimension: 0-1}."""
         prompt = LLM_JUDGE_PROMPT.format(
             skill_gaps=", ".join(skill_gaps),

@@ -1,5 +1,4 @@
-"""
-Recommendation Effectiveness Metric — competition QR-1 implementation.
+"""Legacy in-memory feedback ratio for the historical competition target.
 
 Metric definition (per 赛题 A15):
     推荐有效性 = N_satisfied / N_total_recommendations
@@ -10,14 +9,19 @@ Metric definition (per 赛题 A15):
     - Survey population: 电子/计算机类相关专业毕业生
     - Target: ≥ 80%
 
-Collection methods:
+This arithmetic helper does not reproduce the required real-user survey and is
+not the API persistence source. The service uses ``EventStore`` and accepts
+feedback only after a matching impression.
+
+Collection methods supported by this standalone helper:
     1. Online: POST /api/feedback → per-recommendation satisfied/unsatisfied flag
     2. Offline: simulation from interaction data (apply=definitely satisfied,
-       save=likely satisfied, click=weak satisfied, view=not satisfied)
+       save/click=satisfied proxy, view=not satisfied)
 """
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+
 from collections import defaultdict
+from dataclasses import dataclass, field
+from typing import Dict, List
 
 
 @dataclass
@@ -75,10 +79,14 @@ class EffectivenessCollector:
         n_sat = sum(1 for s in self._samples if s.satisfied)
         eff = n_sat / max(n_total, 1)
         return EffectivenessReport(
-            n_total=n_total, n_satisfied=n_sat,
+            n_total=n_total,
+            n_satisfied=n_sat,
             effectiveness=round(eff, 4),
-            by_user={uid: round(v, 4) for uid, v in self.per_user_effectiveness().items()},
-            pass_threshold=eff >= self.threshold, threshold=self.threshold,
+            by_user={
+                uid: round(v, 4) for uid, v in self.per_user_effectiveness().items()
+            },
+            pass_threshold=eff >= self.threshold,
+            threshold=self.threshold,
         )
 
 
@@ -86,11 +94,14 @@ def simulate_effectiveness_from_interactions(
     users, jobs, interactions, skill_calculator, sample_size: int = 50
 ) -> EffectivenessReport:
     """
-    Offline simulation of recommendation effectiveness from interaction data.
+    Deterministic offline proxy from already synthetic interactions.
+
+    This does not estimate real-user satisfaction.
+
     Maps interaction types to satisfaction signals:
       apply → satisfied (strongest signal)
       save  → satisfied
-      click → 50% chance satisfied (weak signal)
+      click → satisfied proxy (weak signal)
       view  → not satisfied
     """
     collector = EffectivenessCollector()
