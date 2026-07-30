@@ -5,8 +5,12 @@ services:
     environment:
       JOBREC_BUNDLE_PATH: models/jobrec_bundle.json
       JOBREC_EVENT_DB: /app/data/jobrec_events.sqlite3
+      JOBREC_PROFILE_DB: /app/data/jobrec_profiles.sqlite3
+      JOBREC_PROFILE_MASTER_KEY: ${JOBREC_PROFILE_MASTER_KEY:-change-this-profile-key}
       JOBREC_TOKEN_SECRET: ${JOBREC_TOKEN_SECRET:-change-this-in-production}
       JOBREC_DEMO_PASSWORD: ${JOBREC_DEMO_PASSWORD:-jobrec-demo}
+      JOBREC_ADMIN_PASSWORD: ${JOBREC_ADMIN_PASSWORD:-jobrec-admin-demo}
+      JOBREC_RECRUITER_PASSWORD: ${JOBREC_RECRUITER_PASSWORD:-jobrec-recruiter-demo}
     volumes:
       - jobrec-data:/app/data
     healthcheck:

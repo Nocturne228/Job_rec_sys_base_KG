@@ -24,7 +24,9 @@ LightGCN 协同召回、文本召回、技能图谱证据、线性排序、能�
 - **可靠生成**：职业建议使用 Pydantic 约束；外部 OpenAI-compatible 服务不可用
   或输出非法时，返回确定性的证据兜底内容。
 - **服务工程**：FastAPI 提供推荐、能力评估、招聘方反向匹配、反馈、趋势和管理
-  指标接口；曝光与反馈写入 SQLite/WAL；演示鉴权和个人字段加密有回归测试。
+  指标接口；曝光以唯一 ID 关联反馈并拒绝重复，事件写入 SQLite/WAL；演示鉴权和
+  个人档案的姓名、手机、邮箱、通讯地址在进入 SQLite 前逐字段 AES-GCM 加密，只有
+  本人或管理员可以通过 API 解密读取。
 
 ## 系统主链路
 
@@ -62,14 +64,20 @@ uv run uvicorn src.api.routes:app --host 127.0.0.1 --port 8000
 
 访问 `http://127.0.0.1:8000/demo` 查看使用正式 API 的演示页，或访问
 `http://127.0.0.1:8000/docs` 查看 OpenAPI。默认演示账号为 `user_001`，密码为
-`jobrec-demo`；它们仅用于本机演示。
+`jobrec-demo`；管理员和招聘方使用独立的开发密码。所有默认凭据仅用于本机演示，
+共享部署必须通过环境变量覆盖。
 
-需要重新发布模型产物或运行多种子实验时：
+根 `main.py` 是只做委托的便利入口；不带子命令时只显示帮助。需要重新发布模型产物
+或运行多种子实验时，可以使用：
 
 ```bash
-uv run python -m scripts.build_model_bundle --epochs 20
-uv run python -m scripts.run_experiments
+uv run python main.py build-bundle --epochs 20
+uv run python main.py experiments
 ```
+
+它们分别调用 `scripts.build_model_bundle` 和 `src.experiments` 的唯一规范实现，不在
+入口中复制训练逻辑。可选公开数据准备路径见
+[数据与评估](docs/data-and-evaluation.md#3-外部数据获取与隔离准备)。
 
 可选外部适配器默认关闭，启用方法见[架构文档的配置表](docs/architecture.md#8-配置与外部适配器)。
 
@@ -80,8 +88,9 @@ uv run python -m scripts.run_experiments
 | `POST /api/token` | 获取演示 Bearer token | 公开 |
 | `POST /api/recommend` | 已知用户或冷启动岗位推荐 | user/admin |
 | `POST /api/competency` | 指定岗位的能力差距与学习建议 | user/admin |
+| `POST /api/profile`、`GET/DELETE /api/profile/{user_id}` | 加密保存、授权读取或删除四项个人字段 | 本人/admin |
 | `POST /api/recruit/match` | 招聘方候选人反向匹配 | recruiter/admin |
-| `POST /api/feedback` | 记录推荐反馈 | user/admin |
+| `POST /api/feedback` | 按 `impression_id` 记录一次推荐反馈 | user/admin |
 | `GET /api/effectiveness` | 汇总已记录反馈 | admin |
 | `GET /api/trends/hot-jobs` | 演示数据趋势聚合 | user/recruiter/admin |
 | `GET /health/live`、`/health/ready` | 存活与就绪检查 | 公开 |
@@ -90,7 +99,7 @@ API 形状以 `src/api/routes.py` 的 Pydantic 模型和契约测试为准。
 
 ## 当前可复核证据
 
-- **已验证（2026-07-19，本地 Python 3.13）**：17 个测试与 50% 覆盖率门槛通过；
+- **已验证（2026-07-30，本地 Python 3.13）**：21 个测试与 50% 覆盖率门槛通过；
   compile、Black、Isort 和关键边界 mypy 通过。
 - **已验证（2026-07-19，半合成、五种子）**：技能基线的平均 Recall@10 为
   0.2145；加入 GAT 权重的融合模型为 0.2057。复杂模型没有超过简单技能基线，
@@ -109,6 +118,7 @@ API 形状以 `src/api/routes.py` 的 Pydantic 模型和契约测试为准。
 - [架构与设计约束](docs/architecture.md)
 - [数据、实验协议与验证结果](docs/data-and-evaluation.md)
 - [简历表述、演示顺序与面试问答](docs/interview-guide.md)
+- [开发问题与解决方案](docs/problem-solving.md)
 - [开发与文档规约](AGENTS.md)
 - [外部参考资料说明](ref/README.md)
 
@@ -118,7 +128,7 @@ API 形状以 `src/api/routes.py` 的 Pydantic 模型和契约测试为准。
 src/        模型、召回、排序、图谱、生成、API、指标
 scripts/    模型发布、实验、Neo4j 导入、负载冒烟
 tests/      数据泄漏、模型、排序、安全、持久化和 API 契约测试
-data/       半合成数据与本地运行状态
+data/       半合成数据、本地运行状态和被忽略的外部 staging
 models/     版本化服务 bundle 与 checkpoint
 results/    机器可读实验和验证证据
 docs/       当前维护的设计、证据与面试说明

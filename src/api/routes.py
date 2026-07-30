@@ -10,13 +10,20 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, List, Optional
+from uuid import uuid4
 
 import torch
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, model_validator
 
-from src.data import DataLoader, GraphLoader, generate_mock_data
+from src.data import (
+    DataLoader,
+    EncryptedProfileStore,
+    GraphLoader,
+    PrivateProfile,
+    generate_mock_data,
+)
 from src.generation import (
     LLMSimulator,
     OpenAICompatibleLLM,
@@ -50,6 +57,8 @@ class ResumeUpload(BaseModel):
 
 
 class RecommendResponse(BaseModel):
+    request_id: str
+    impression_id: int
     job_id: str
     title: str
     score: float
@@ -77,9 +86,33 @@ class CandidateMatch(BaseModel):
 
 
 class FeedbackRequest(BaseModel):
+    impression_id: int = Field(gt=0)
     user_id: str
     job_id: str
     satisfied: bool
+
+
+class FeedbackResponse(BaseModel):
+    status: str
+    impression_id: int
+    n_total: int
+    n_satisfied: int
+    effectiveness: float
+    pass_threshold: bool
+    by_user: Dict[str, float]
+
+
+class PrivateProfileRequest(PrivateProfile):
+    user_id: str = Field(min_length=1, max_length=100)
+
+
+class PrivateProfileResponse(PrivateProfile):
+    user_id: str
+
+
+class PrivateProfileMutationResponse(BaseModel):
+    status: str
+    user_id: str
 
 
 class TrendReport(BaseModel):
@@ -165,6 +198,12 @@ def _load_pipeline() -> dict:
     event_store = EventStore(
         os.environ.get("JOBREC_EVENT_DB", "data/jobrec_events.sqlite3")
     )
+    profile_store = EncryptedProfileStore(
+        os.environ.get("JOBREC_PROFILE_DB", "data/jobrec_profiles.sqlite3"),
+        os.environ.get(
+            "JOBREC_PROFILE_MASTER_KEY", "development-only-profile-master-key"
+        ),
+    )
     analyzer = TrendAnalyzer(
         jobs=data.jobs, users=data.users, interactions=data.interactions
     )
@@ -184,6 +223,7 @@ def _load_pipeline() -> dict:
         "graph_source": graph_source,
         "llm": llm,
         "event_store": event_store,
+        "profile_store": profile_store,
         "analyzer": analyzer,
         "reverse": reverse,
         "started_at": time.time(),
@@ -201,7 +241,7 @@ async def lifespan(app: FastAPI):
         graph.close()
 
 
-app = FastAPI(title="JobRec-KG API", version="2.0", lifespan=lifespan)
+app = FastAPI(title="JobRec-KG API", version="2.2", lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -266,16 +306,28 @@ def _target_job(data, job_id: Optional[str], title: Optional[str]):
     return matches[0]
 
 
+def _require_profile_owner_or_admin(claims: dict, user_id: str) -> None:
+    if claims["role"] != "admin" and claims["sub"] != user_id:
+        raise HTTPException(
+            status_code=403, detail="Cannot access another user's private profile"
+        )
+
+
 @app.post("/api/token")
 def token(req: TokenRequest):
-    expected = os.environ.get("JOBREC_DEMO_PASSWORD", "jobrec-demo")
-    if not hmac.compare_digest(req.password, expected):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
     role = (
         "admin"
         if req.username == "admin"
         else "recruiter" if req.username == "recruiter" else "user"
     )
+    if role == "admin":
+        expected = os.environ.get("JOBREC_ADMIN_PASSWORD", "jobrec-admin-demo")
+    elif role == "recruiter":
+        expected = os.environ.get("JOBREC_RECRUITER_PASSWORD", "jobrec-recruiter-demo")
+    else:
+        expected = os.environ.get("JOBREC_DEMO_PASSWORD", "jobrec-demo")
+    if not hmac.compare_digest(req.password, expected):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
     return {
         "access_token": issue_token(req.username, role),
         "token_type": "bearer",
@@ -312,6 +364,54 @@ def model_info(
         "created_at": bundle.created_at,
         "graph_source": pipeline["graph_source"],
     }
+
+
+@app.post(
+    "/api/profile",
+    response_model=PrivateProfileMutationResponse,
+)
+def upsert_private_profile(
+    req: PrivateProfileRequest,
+    request: Request,
+    claims=Depends(require_roles("user", "admin")),
+):
+    _require_profile_owner_or_admin(claims, req.user_id)
+    get_pipeline(request)["profile_store"].upsert(
+        req.user_id,
+        PrivateProfile.model_validate(req.model_dump(exclude={"user_id"})),
+    )
+    return PrivateProfileMutationResponse(
+        status="stored_encrypted", user_id=req.user_id
+    )
+
+
+@app.get("/api/profile/{user_id}", response_model=PrivateProfileResponse)
+def get_private_profile(
+    user_id: str,
+    request: Request,
+    claims=Depends(require_roles("user", "admin")),
+):
+    _require_profile_owner_or_admin(claims, user_id)
+    profile = get_pipeline(request)["profile_store"].get(user_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Private profile not found")
+    return PrivateProfileResponse(user_id=user_id, **profile.model_dump())
+
+
+@app.delete(
+    "/api/profile/{user_id}",
+    response_model=PrivateProfileMutationResponse,
+)
+def delete_private_profile(
+    user_id: str,
+    request: Request,
+    claims=Depends(require_roles("user", "admin")),
+):
+    _require_profile_owner_or_admin(claims, user_id)
+    deleted = get_pipeline(request)["profile_store"].delete(user_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Private profile not found")
+    return PrivateProfileMutationResponse(status="deleted", user_id=user_id)
 
 
 @app.post("/api/recommend", response_model=List[RecommendResponse])
@@ -369,17 +469,23 @@ def recommend_jobs(
     ranked = p["ranker"].rank_with_explanations(features)[:10]
     results: List[RecommendResponse] = []
     event_user = req.user_id or claims["sub"]
+    request_id = uuid4().hex
     for index, score, contribution in ranked:
         job = jobs[index]
-        p["event_store"].record(
-            "impression",
+        impression_id = p["event_store"].record_impression(
             event_user,
             job.id,
             p["bundle"].model_version,
-            {"rank": len(results) + 1, "retrieval_mode": mode},
+            {
+                "rank": len(results) + 1,
+                "request_id": request_id,
+                "retrieval_mode": mode,
+            },
         )
         results.append(
             RecommendResponse(
+                request_id=request_id,
+                impression_id=impression_id,
                 job_id=job.id,
                 title=job.title,
                 score=round(score, 4),
@@ -482,7 +588,7 @@ def recruit_match(
     ]
 
 
-@app.post("/api/feedback")
+@app.post("/api/feedback", response_model=FeedbackResponse)
 def submit_feedback(
     req: FeedbackRequest,
     request: Request,
@@ -495,6 +601,7 @@ def submit_feedback(
         )
     try:
         p["event_store"].record_feedback(
+            req.impression_id,
             req.user_id,
             req.job_id,
             p["bundle"].model_version,
@@ -505,6 +612,7 @@ def submit_feedback(
     stats = p["event_store"].effectiveness()
     return {
         "status": "recorded",
+        "impression_id": req.impression_id,
         **stats,
         "pass_threshold": stats["effectiveness"] >= 0.8,
     }

@@ -20,15 +20,27 @@ def _derive_key(password: str, salt: bytes) -> bytes:
     )
 
 
-def encrypt_personal_info(plaintext: str, master_password: str) -> str:
+def _associated_data(context: str) -> bytes:
+    return _MAGIC + context.encode("utf-8")
+
+
+def encrypt_personal_info(
+    plaintext: str, master_password: str, *, context: str = ""
+) -> str:
+    """Encrypt one field with random salt/nonce and optional context binding."""
     salt = os.urandom(_SALT_BYTES)
     nonce = os.urandom(_NONCE_BYTES)
     key = _derive_key(master_password, salt)
-    ciphertext = AESGCM(key).encrypt(nonce, plaintext.encode("utf-8"), _MAGIC)
+    ciphertext = AESGCM(key).encrypt(
+        nonce, plaintext.encode("utf-8"), _associated_data(context)
+    )
     return base64.urlsafe_b64encode(_MAGIC + salt + nonce + ciphertext).decode("ascii")
 
 
-def decrypt_personal_info(encrypted_b64: str, master_password: str) -> str:
+def decrypt_personal_info(
+    encrypted_b64: str, master_password: str, *, context: str = ""
+) -> str:
+    """Authenticate and decrypt one field in the same bound context."""
     raw = base64.urlsafe_b64decode(encrypted_b64.encode("ascii"))
     minimum = len(_MAGIC) + _SALT_BYTES + _NONCE_BYTES + 16
     if len(raw) < minimum or raw[: len(_MAGIC)] != _MAGIC:
@@ -39,7 +51,11 @@ def decrypt_personal_info(encrypted_b64: str, master_password: str) -> str:
     nonce = raw[offset : offset + _NONCE_BYTES]
     ciphertext = raw[offset + _NONCE_BYTES :]
     key = _derive_key(master_password, salt)
-    return AESGCM(key).decrypt(nonce, ciphertext, _MAGIC).decode("utf-8")
+    return (
+        AESGCM(key)
+        .decrypt(nonce, ciphertext, _associated_data(context))
+        .decode("utf-8")
+    )
 
 
 SENSITIVE_FIELDS = ["name", "phone", "email", "address"]

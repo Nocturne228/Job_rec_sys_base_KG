@@ -138,7 +138,8 @@ uv run black --check src scripts tests main.py
 uv run isort --check-only src scripts tests main.py
 uv run mypy src/api/routes.py src/models/bundle.py src/data/graph_store.py \
   src/generation/adapters.py src/security.py src/data/models.py \
-  src/metrics/event_store.py
+  src/metrics/event_store.py src/data/private_profile_store.py \
+  src/utils/crypto.py
 ```
 
 附加要求：
@@ -158,6 +159,8 @@ uv run mypy src/api/routes.py src/models/bundle.py src/data/graph_store.py \
 - `docs/architecture.md`：组件边界、数据流、设计决策、运行时与故障模式；
 - `docs/data-and-evaluation.md`：数据契约、生成/切分协议、指标、实测结果和限制；
 - `docs/interview-guide.md`：基于上述事实的简历表述、演示顺序和问答；
+- `docs/problem-solving.md`：开发中已关闭问题的症状、分析思路、解决办法、回归证据
+  和遗留限制；
 - `ref/README.md`：外部资料使用规则与精简索引；
 - `data/`、`models/`、`results/`、`logs/` 下的 README：目录级产物生命周期。
 
@@ -171,7 +174,11 @@ uv run mypy src/api/routes.py src/models/bundle.py src/data/graph_store.py \
 6. 外部资料使用转述并可追溯到原文件，不大段复制，不把论文结果移植成本项目结果；
 7. Markdown 文件使用职责明确的英文 `kebab-case.md`，标准元数据保留 `README.md`
    和 `AGENTS.md`；不使用编号前缀、版本后缀或“最终版”等名字；
-8. 不维护第二份 Changelog、整改计划、复盘报告或正式论文来重复 Git 历史和当前文档。
+8. 每次解决具有可复用价值的问题时，更新 `docs/problem-solving.md`。每条记录必须
+   包含问题/影响、定位与分析思路、采取的解决办法、验证命令或测试、仍未覆盖的边界；
+   不记录密钥、个人数据或无关的逐步操作日志。
+9. `problem-solving.md` 解释“为何这样改”，不能复制架构说明、完整实验表或 Git
+   提交历史；不维护第二份 Changelog、整改计划、无边界复盘报告或正式论文。
 
 行为变化必须在同一次修改中更新代码、测试和事实归属文档。过时文档在唯一信息迁移
 后直接删除，不放入 `archive/` 制造第二套事实来源。

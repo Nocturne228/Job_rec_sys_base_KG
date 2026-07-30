@@ -28,6 +28,9 @@ class EventStore:
     def _initialize(self) -> None:
         with self._connect() as db:
             db.execute("PRAGMA journal_mode=WAL")
+            # Serialize the one-time migration when several workers start against
+            # the same pre-existing demo database.
+            db.execute("BEGIN IMMEDIATE")
             db.execute("""
                 CREATE TABLE IF NOT EXISTS events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -35,69 +38,99 @@ class EventStore:
                     user_id TEXT NOT NULL,
                     job_id TEXT NOT NULL,
                     model_version TEXT NOT NULL,
+                    impression_id INTEGER,
                     payload TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            columns = {
+                row["name"]
+                for row in db.execute("PRAGMA table_info(events)").fetchall()
+            }
+            if "impression_id" not in columns:
+                db.execute("ALTER TABLE events ADD COLUMN impression_id INTEGER")
+            db.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS one_feedback_per_impression
+                ON events(impression_id)
+                WHERE event_type='feedback'
+                """)
 
-    def record(
+    def record_impression(
         self,
-        event_type: str,
         user_id: str,
         job_id: str,
         model_version: str,
         payload: Dict[str, Any] | None = None,
-    ) -> None:
+    ) -> int:
         with self._connect() as db:
-            db.execute(
-                "INSERT INTO events(event_type,user_id,job_id,model_version,payload) VALUES(?,?,?,?,?)",
+            cursor = db.execute(
+                """
+                INSERT INTO events(event_type,user_id,job_id,model_version,payload)
+                VALUES('impression',?,?,?,?)
+                """,
                 (
-                    event_type,
                     user_id,
                     job_id,
                     model_version,
                     json.dumps(payload or {}, sort_keys=True),
                 ),
             )
+            return int(cursor.lastrowid)
 
     def record_feedback(
         self,
+        impression_id: int,
         user_id: str,
         job_id: str,
         model_version: str,
         satisfied: bool,
     ) -> None:
-        """Record feedback only when the same model exposed the job first."""
+        """Record one feedback event for the exact matching impression."""
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             impression = db.execute(
                 """
                 SELECT 1 FROM events
                 WHERE event_type='impression'
-                  AND user_id=? AND job_id=? AND model_version=?
+                  AND id=? AND user_id=? AND job_id=? AND model_version=?
                 LIMIT 1
                 """,
-                (user_id, job_id, model_version),
+                (impression_id, user_id, job_id, model_version),
             ).fetchone()
             if impression is None:
-                raise ValueError("feedback requires a matching impression")
+                raise ValueError("feedback requires the exact matching impression")
+            duplicate = db.execute(
+                """
+                SELECT 1 FROM events
+                WHERE event_type='feedback' AND impression_id=?
+                LIMIT 1
+                """,
+                (impression_id,),
+            ).fetchone()
+            if duplicate is not None:
+                raise ValueError("feedback already recorded for impression")
             db.execute(
                 """
-                INSERT INTO events(event_type,user_id,job_id,model_version,payload)
-                VALUES('feedback',?,?,?,?)
+                INSERT INTO events(
+                    event_type,user_id,job_id,model_version,impression_id,payload
+                )
+                VALUES('feedback',?,?,?,?,?)
                 """,
                 (
                     user_id,
                     job_id,
                     model_version,
+                    impression_id,
                     json.dumps({"satisfied": satisfied}, sort_keys=True),
                 ),
             )
 
     def effectiveness(self) -> Dict[str, Any]:
         with self._connect() as db:
-            rows = db.execute(
-                "SELECT user_id, payload FROM events WHERE event_type='feedback'"
-            ).fetchall()
+            rows = db.execute("""
+                SELECT user_id, payload FROM events
+                WHERE event_type='feedback' AND impression_id IS NOT NULL
+                """).fetchall()
         totals: Dict[str, int] = {}
         satisfied: Dict[str, int] = {}
         for row in rows:

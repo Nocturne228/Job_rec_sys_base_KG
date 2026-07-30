@@ -1,8 +1,11 @@
 import base64
+import sqlite3
+from contextlib import closing
 
 import pytest
 import torch
 
+from src.data import EncryptedProfileStore, PrivateProfile
 from src.generation import LLMSimulator, fallback_advice, validate_advice
 from src.metrics import EventStore
 from src.metrics.ab_test import mann_whitney_u, welch_t_test, z_test_proportions
@@ -28,6 +31,55 @@ def test_aes_gcm_round_trip_randomness_and_tamper_detection():
         )
 
 
+def test_private_profile_store_encrypts_four_fields_and_binds_ciphertext(tmp_path):
+    path = tmp_path / "private-profiles.sqlite3"
+    store = EncryptedProfileStore(str(path), "profile-store-test-master-key")
+    profile = PrivateProfile(
+        name="Alice Chen",
+        phone="13800138000",
+        email="alice@example.com",
+        address="1 Example Road, Shanghai",
+    )
+    store.upsert("user_001", profile)
+
+    with closing(sqlite3.connect(path)) as db:
+        row = db.execute("""
+            SELECT name_ciphertext, phone_ciphertext,
+                   email_ciphertext, address_ciphertext
+            FROM private_profiles WHERE user_id='user_001'
+            """).fetchone()
+        assert row is not None
+        assert all(
+            value and value not in profile.model_dump().values() for value in row
+        )
+        db.execute(
+            """
+            UPDATE private_profiles
+            SET name_ciphertext=?, email_ciphertext=?
+            WHERE user_id='user_001'
+            """,
+            (row[2], row[0]),
+        )
+        db.commit()
+
+    database_bytes = path.read_bytes()
+    for plaintext in profile.model_dump().values():
+        assert plaintext.encode() not in database_bytes
+
+    # Context-bound AAD rejects moving a valid ciphertext to another field.
+    with pytest.raises(Exception):
+        store.get("user_001")
+
+    clean = EncryptedProfileStore(
+        str(tmp_path / "clean-private-profiles.sqlite3"),
+        "profile-store-test-master-key",
+    )
+    clean.upsert("user_001", profile)
+    assert clean.get("user_001") == profile
+    assert clean.delete("user_001") is True
+    assert clean.get("user_001") is None
+
+
 def test_signed_tokens_reject_expiry_and_tampering(monkeypatch):
     monkeypatch.setenv("JOBREC_TOKEN_SECRET", "unit-test-secret")
     token = issue_token("u1", "admin")
@@ -41,16 +93,59 @@ def test_signed_tokens_reject_expiry_and_tampering(monkeypatch):
 def test_event_store_persists_feedback_across_instances(tmp_path):
     path = tmp_path / "events.sqlite3"
     first = EventStore(str(path))
-    first.record("impression", "u1", "j1", "v1")
-    first.record("impression", "u1", "j2", "v1")
-    first.record_feedback("u1", "j1", "v1", True)
-    first.record_feedback("u1", "j2", "v1", False)
-    with pytest.raises(ValueError, match="matching impression"):
-        first.record_feedback("u1", "unseen", "v1", True)
+    first_impression = first.record_impression("u1", "j1", "v1")
+    second_impression = first.record_impression("u1", "j2", "v1")
+    first.record_feedback(first_impression, "u1", "j1", "v1", True)
+    first.record_feedback(second_impression, "u1", "j2", "v1", False)
+    with pytest.raises(ValueError, match="exact matching impression"):
+        first.record_feedback(first_impression, "u1", "unseen", "v1", True)
+    with pytest.raises(ValueError, match="already recorded"):
+        first.record_feedback(first_impression, "u1", "j1", "v1", True)
     second = EventStore(str(path))
     stats = second.effectiveness()
     assert stats["n_total"] == 2
     assert stats["effectiveness"] == 0.5
+    feedback_events = [
+        event for event in second.list_events() if event["event_type"] == "feedback"
+    ]
+    assert {event["impression_id"] for event in feedback_events} == {
+        first_impression,
+        second_impression,
+    }
+
+
+def test_event_store_migrates_legacy_schema_before_exact_feedback(tmp_path):
+    path = tmp_path / "legacy-events.sqlite3"
+    with closing(sqlite3.connect(path)) as db:
+        with db:
+            db.execute("""
+                CREATE TABLE events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_type TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    job_id TEXT NOT NULL,
+                    model_version TEXT NOT NULL,
+                    payload TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """)
+            cursor = db.execute("""
+                INSERT INTO events(event_type,user_id,job_id,model_version)
+                VALUES('impression','u1','j1','v1')
+                """)
+            impression_id = int(cursor.lastrowid)
+            db.execute("""
+                INSERT INTO events(event_type,user_id,job_id,model_version,payload)
+                VALUES('feedback','u1','j1','v1','{"satisfied": false}')
+                """)
+
+    store = EventStore(str(path))
+    store.record_feedback(impression_id, "u1", "j1", "v1", True)
+    # A legacy feedback row has no exact exposure relationship and is retained
+    # for inspection, but it must not affect the post-migration statistic.
+    assert store.effectiveness()["n_total"] == 1
+    assert store.effectiveness()["n_satisfied"] == 1
+    assert "impression_id" in store.list_events()[0]
 
 
 def test_negative_sampler_never_selects_observed_item():

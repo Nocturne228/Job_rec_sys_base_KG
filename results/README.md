@@ -7,7 +7,6 @@
 | `experiment_summary.json` | `uv run python -m scripts.run_experiments` | 五种子基线和消融的逐次值、均值与总体标准差 |
 | `coverage.json` | pytest/coverage | 记录运行的源码覆盖率明细 |
 | `load_test_summary.json` | `uv run python -m scripts.load_test` | 本地 API 小规模负载冒烟 |
-| `demo_results.pkl` | 旧完整 demo 入口 | 可重建兼容产物，不是规范实验记录 |
 
 新实验产物必须记录数据/生成器版本、规模、切分、候选池、种子、模型配置、环境、
 指标定义和生成时间。不得手工修改结果数字。解释和限制由
