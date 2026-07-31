@@ -89,6 +89,8 @@ def test_authenticated_api_known_cold_start_competency_and_feedback(
         assert any(abs(row["contributions"]["lightgcn"]) > 0 for row in known.json())
         assert len({row["request_id"] for row in known.json()}) == 1
         assert len({row["impression_id"] for row in known.json()}) == len(known.json())
+        seen = set(client.app.state.pipeline["bundle"].train_items_by_user["user_001"])
+        assert seen.isdisjoint(row["job_id"] for row in known.json())
 
         cold_token = _token(client, "new_user")
         cold = client.post(

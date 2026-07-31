@@ -37,6 +37,9 @@ flowchart LR
   C -. 可选 .-> L["OpenAI-compatible LLM"]
   T["离线训练与实验"] --> B
   T --> X[("results JSON")]
+  B --> S["合成 Persona 离线评估"]
+  S -. 可选 .-> L
+  S --> X
   N[("可选 Neo4j")] -. 适配器 .-> G
 ```
 
@@ -58,6 +61,7 @@ flowchart LR
 | 技能证据 | GAT 技能权重与等级感知覆盖率 | `src/models/gat.py`、`src/ranking/` |
 | 排序 | 请求级归一化、线性融合、可加解释 | `src/ranking/linear_fusion.py` |
 | 能力评估 | 技能差距、图路径、结构化建议与兜底 | `src/generation/` |
+| 合成用户评估 | Persona 潜在匹配判断、位置偏置行为与独立汇总 | `src/simulation/`、`scripts/run_user_simulation.py` |
 | 服务 | 鉴权、编排、推荐、评估、反馈、健康与指标 | `src/api/routes.py`、`src/security.py` |
 | 持久化 | SQLite/WAL 曝光反馈；四字段加密个人档案 | `src/metrics/event_store.py`、`src/data/private_profile_store.py` |
 | 实验 | 指标、基线、消融、公平性诊断、负载冒烟 | `src/experiments/`、`src/metrics/`、`scripts/` |
@@ -173,6 +177,36 @@ Neo4j 开启时，响应中的 `evidence_source` 与实际查询一致。传入�
 LLM 失败是预期分支：网络异常、非法 JSON 或 schema 不合格均回退到根据技能差距
 构造的 `CareerAdvice`。兜底不是“LLM 质量已验证”，也不得绕过图证据。
 
+### 6.1 合成用户离线评估
+
+该链路不调用推荐 API，也不写入 `EventStore`。它从发布 bundle 重建 known-user
+hybrid 推荐，先排除训练期已见岗位，再把不含推荐分数、展示位置和目标通过率的
+Persona/岗位最小数据交给判断器。
+
+```mermaid
+flowchart LR
+  B[("ModelBundle")] --> R["屏蔽 seen 后的 Top-K"]
+  R --> J{"潜在匹配判断"}
+  P["最小化合成 Persona"] --> J
+  J -->|默认| D["确定性透明基线"]
+  J -. "可选" .-> L["外部 LLM + Pydantic"]
+  L -->|非法/失败| D
+  J --> E["固定代码派生 effective"]
+  E --> M["位置观察 × 吸引概率"]
+  M --> A["合成点击/收藏/投递/反馈"]
+  E --> X[("独立 results JSON")]
+  A --> X
+```
+
+`effective` 不由 LLM 直接给出，而由硬约束、技能匹配和考虑意愿的固定阈值派生；
+行为模型用单调下降的 rank examination curve 将潜在相关性转换为可观察事件，并按
+`seed/persona/job/action` 哈希取样，保证顺序无关的复现。岗位描述视为不可信数据，
+外部输出必须满足 schema，失败来源会记录为 `deterministic_fallback`。
+
+这里的目标是测试评估假设和代码路径，不是制造真实标签。LLM 判断与概率行为均不得
+进入 `/api/effectiveness`，也不能用于证明真实调查、线上 CTR 或因果收益。协议、结果
+和文献依据见[数据与评估](data-and-evaluation.md#61-合成用户评估协议)。
+
 ## 7. 生命周期、事件与可观测性
 
 FastAPI lifespan 启动时生成固定种子演示实体、校验并加载 bundle、计算只读 embedding、
@@ -247,6 +281,7 @@ JOBREC_GRAPH_BACKEND=neo4j NEO4J_PASSWORD=... uv run uvicorn src.api.routes:app
 | 技能权重 | GAT 训练后静态发布 | 展示图特征流程；使用代理标签，不代表真实业务重要度 |
 | 技能图 | 内存默认、Neo4j 可选 | 保持自包含，同时展示可替换存储边界 |
 | 生成 | schema + 确定性兜底 | 把事实证据与文案生成解耦，外部模型质量未验证 |
+| 合成用户评估 | 潜在匹配判断与位置行为分层 | 可复现并避免把 rank 暗示给判断器；缺少真人校准 |
 | 事件存储 | SQLite/WAL | 足够本机演示，不宣称分布式吞吐或耐久性 |
 | 个人档案 | AES-GCM 字段加密 + 本人/admin RBAC | 满足赛题演示条款；默认凭据和本地密钥不适合共享部署 |
 
@@ -262,6 +297,7 @@ JOBREC_GRAPH_BACKEND=neo4j NEO4J_PASSWORD=... uv run uvicorn src.api.routes:app
 | 预训练文本模型不可用 | 默认 hashing 仍可运行 | 固定模型版本、缓存和领域评估 |
 | Neo4j 不可用 | 默认内存图可运行 | 集成/故障测试和明确降级策略 |
 | LLM 超时或非法输出 | 返回校验后的确定性兜底 | 预算、追踪、重试与人工质量评估 |
+| LLM 用户模拟现实差距 | 显式标记 proxy，默认保留确定性基线 | 盲测人工校准、多模型一致性与真实行为对照 |
 | 反馈迟到、重放或跨实验归因 | 精确曝光关联并拒绝重复反馈 | 实验分组、事件时钟、有效期与幂等消费 |
 | 半合成分布偏差 | 只报告协议性结果 | 合法新数据的时间切分、漂移与在线验证 |
 | 公平/隐私结论 | 四字段加密与授权解密已验证；公平性仍只有工具 | 托管身份/KMS、合法属性、治理流程和独立审计 |

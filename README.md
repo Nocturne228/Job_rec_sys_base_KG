@@ -23,6 +23,8 @@ LightGCN 协同召回、文本召回、技能图谱证据、线性排序、能�
   `PREREQUISITE_OF` 边；默认使用内存图，也提供 Neo4j 适配器。
 - **可靠生成**：职业建议使用 Pydantic 约束；外部 OpenAI-compatible 服务不可用
   或输出非法时，返回确定性的证据兜底内容。
+- **合成用户评估**：Persona 约束的可选 LLM 判断只估计潜在人岗相关性，独立的
+  位置观察模型再生成点击、收藏、投递与满意反馈；结果与真实反馈统计完全隔离。
 - **服务工程**：FastAPI 提供推荐、能力评估、招聘方反向匹配、反馈、趋势和管理
   指标接口；曝光以唯一 ID 关联反馈并拒绝重复，事件写入 SQLite/WAL；演示鉴权和
   个人档案的姓名、手机、邮箱、通讯地址在进入 SQLite 前逐字段 AES-GCM 加密，只有
@@ -73,6 +75,7 @@ uv run uvicorn src.api.routes:app --host 127.0.0.1 --port 8000
 ```bash
 uv run python main.py build-bundle --epochs 20
 uv run python main.py experiments
+uv run python main.py simulate-users --judge deterministic
 ```
 
 它们分别调用 `scripts.build_model_bundle` 和 `src.experiments` 的唯一规范实现，不在
@@ -99,11 +102,14 @@ API 形状以 `src/api/routes.py` 的 Pydantic 模型和契约测试为准。
 
 ## 当前可复核证据
 
-- **已验证（2026-07-30，本地 Python 3.13）**：21 个测试与 50% 覆盖率门槛通过；
+- **已验证（2026-07-31，本地 Python 3.13）**：28 个测试与 50% 覆盖率门槛通过；
   compile、Black、Isort 和关键边界 mypy 通过。
 - **已验证（2026-07-19，半合成、五种子）**：技能基线的平均 Recall@10 为
   0.2145；加入 GAT 权重的融合模型为 0.2057。复杂模型没有超过简单技能基线，
   这是保留并需要解释的负面结果。
+- **已验证（2026-07-31，半合成、确定性 Persona 基线）**：对发布 bundle 的
+  20×Top-10 推荐执行潜在匹配判断与位置偏置行为模拟；`ProxyEffectiveness@10`
+  为 12.0%。该数值只校验协议，不是 LLM 结果或真实用户有效率。
 - **已验证（2026-07-15，单机冒烟）**：100 个请求、并发 10、错误率 0%，
   P95 103.91 ms。该结果不是耐久压测、多 worker 验证或生产 SLO。
 - **环境受限**：Docker/Compose 和 Neo4j 适配代码已提供，但当前保留证据没有证明
@@ -125,8 +131,8 @@ API 形状以 `src/api/routes.py` 的 Pydantic 模型和契约测试为准。
 ## 仓库结构
 
 ```text
-src/        模型、召回、排序、图谱、生成、API、指标
-scripts/    模型发布、实验、Neo4j 导入、负载冒烟
+src/        模型、召回、排序、图谱、生成、合成用户评估、API、指标
+scripts/    模型发布、实验、合成用户评估、Neo4j 导入、负载冒烟
 tests/      数据泄漏、模型、排序、安全、持久化和 API 契约测试
 data/       半合成数据、本地运行状态和被忽略的外部 staging
 models/     版本化服务 bundle 与 checkpoint

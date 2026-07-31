@@ -1,0 +1,69 @@
+{
+  "generated_at": "2026-07-31T01:26:25.414522+00:00",
+  "evidence_label": "已验证",
+  "run_metadata": {
+    "data_kind": "fixed-seed semi-synthetic",
+    "data_seed": 42,
+    "behavior_seed": 20260731,
+    "model_version": "semi-synthetic-v1-seed42",
+    "ranking": "published hybrid LightGCN + feature-hashing semantic + skill coverage",
+    "seen_item_policy": "exclude bundle training interactions before ranking",
+    "requested_judge_mode": "deterministic",
+    "include_records": false,
+    "python": "3.13.12",
+    "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "command": "uv run python -m scripts.run_user_simulation --judge deterministic --users 20 --top-k 10"
+  },
+  "metric_definitions": {
+    "proxy_effectiveness_at_k": "有效判断数/评估岗位数；有效=硬约束通过且 skill_fit>=4 且 willingness_to_consider>=4；仅全 LLM 模式可称 LLMProxyEffectiveness@K",
+    "simulated_ctr_at_k": "合成点击数/合成曝光数",
+    "simulated_feedback_effectiveness": "合成满意反馈数/有合成反馈的曝光数；不等同真实用户调查"
+  },
+  "literature": [
+    {
+      "name": "RecSim: A Configurable Simulation Platform for Recommender Systems",
+      "url": "https://research.google/pubs/recsim-a-configurable-simulation-platform-for-recommender-systems/",
+      "use": "将用户偏好、状态与选择/响应行为分开建模"
+    },
+    {
+      "name": "Position Bias Estimation for Unbiased Learning to Rank",
+      "url": "https://research.google/pubs/position-bias-estimation-for-unbiased-learning-to-rank-in-personal-search/",
+      "use": "位置观察偏差与相关性分离"
+    },
+    {
+      "name": "Large Language Models as Simulated Economic Agents",
+      "url": "https://aclanthology.org/2024.naacl-long.83/",
+      "use": "LLM 用户模拟评估协议与模型/提示词敏感性边界"
+    },
+    {
+      "name": "LLM-Powered User Simulator for Recommender System",
+      "url": "https://ojs.aaai.org/index.php/AAAI/article/view/33456",
+      "use": "LLM 推理与统计参与度模型组合"
+    },
+    {
+      "name": "The Realism Gap in LLM-Based User Simulators",
+      "url": "https://aclanthology.org/2026.eacl-long.244/",
+      "use": "记录 prompt-only 模拟与真实用户之间的现实差距"
+    }
+  ],
+  "summary": {
+    "schema_version": 1,
+    "protocol": "synthetic-persona-judgment-plus-position-aware-behavior",
+    "prompt_version": "persona-job-judge-v1",
+    "judge_mode": "deterministic",
+    "top_k": 10,
+    "personas": 20,
+    "impressions": 200,
+    "effective_judgments": 24,
+    "proxy_effectiveness_at_k": 0.12,
+    "simulated_ctr_at_k": 0.265,
+    "simulated_save_rate_at_k": 0.08,
+    "simulated_apply_rate_at_k": 0.025,
+    "simulated_feedback_count": 26,
+    "simulated_feedback_effectiveness": 0.46153846153846156,
+    "source_counts": {
+      "deterministic": 200
+    },
+    "records": []
+  }
+}

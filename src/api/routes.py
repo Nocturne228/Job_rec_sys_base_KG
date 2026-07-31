@@ -435,10 +435,6 @@ def recommend_jobs(
             for key, value in user_map[req.user_id].skills.items()
         }
     jobs = _candidate_jobs(p["data"], req.expected_job_title)
-    job_ids = [job.id for job in jobs]
-    semantic = dict(
-        p["sbert"].recommend_for_text(resume, k=len(job_ids), job_ids=job_ids)
-    )
     lg_scores: Dict[str, float] = {}
     mode = "cold_start_semantic_skill"
     if known:
@@ -446,10 +442,14 @@ def recommend_jobs(
         user_idx = p["bundle"].user_id_to_idx[req.user_id]
         raw = (p["user_embeddings"][user_idx] @ p["item_embeddings"].T).detach().cpu()
         seen = set(p["bundle"].train_items_by_user.get(req.user_id, []))
+        jobs = [job for job in jobs if job.id not in seen]
+    job_ids = [job.id for job in jobs]
+    semantic = dict(
+        p["sbert"].recommend_for_text(resume, k=len(job_ids), job_ids=job_ids)
+    )
+    if known:
         lg_scores = {
-            job_id: float(raw[p["bundle"].job_id_to_idx[job_id]])
-            for job_id in job_ids
-            if job_id not in seen
+            job_id: float(raw[p["bundle"].job_id_to_idx[job_id]]) for job_id in job_ids
         }
 
     features = []

@@ -29,6 +29,18 @@
 | 技能与岗位 | [`Skills2Job`](<papers/Skills2Job--A-recommender-system-that-encodes-job-offer-_2021_Applied-Soft-C.pdf>) | 技能表达与岗位推荐背景 |
 | 历史任务 | [`赛题.pdf`](赛题.pdf) | 项目最初题目和目标；目标不等于当前已验证结果 |
 
+### 用户模拟与反馈偏差
+
+以下来源通过正式网页引用，未把论文指标复制为本项目结果：
+
+| 文献 | 本项目使用方式 |
+|---|---|
+| [Ie et al., RecSim, 2019](https://research.google/pubs/recsim-a-configurable-simulation-platform-for-recommender-systems/) | 将 Persona 潜在偏好与选择/响应行为分层 |
+| [Agarwal et al., Position Bias Estimation, 2019](https://research.google/pubs/position-bias-estimation-for-unbiased-learning-to-rank-in-personal-search/) | 用 rank examination curve 表达位置观察偏差 |
+| [Horton, NAACL 2024](https://aclanthology.org/2024.naacl-long.83/) | 设计结构化代理评估，并保留 prompt/模型敏感性边界 |
+| [Zhang et al., AAAI 2025](https://ojs.aaai.org/index.php/AAAI/article/view/33456) | 参考 LLM 推理与统计参与度模型的组合思路 |
+| [Kim et al., EACL 2026](https://aclanthology.org/2026.eacl-long.244/) | 明确记录 prompt-only 用户模拟的 realism gap |
+
 其他材料保存在 [`papers/`](papers/)；文件名即当前的最小本地索引。需要正式发表或
 提交材料时，应另行生成经核对的标准参考文献列表，而不是依赖文件名猜测书目信息。
 

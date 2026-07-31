@@ -34,6 +34,7 @@ Changelog、待办清单或第二份架构文档。当前系统行为见
 | P-010 | 根入口复制训练管线并可单独覆盖 checkpoint | 如何避免两套实现和离线/在线状态分裂 | 已关闭，CLI 只委托规范入口 |
 | P-011 | 可获取外部数据缺少许可和 lineage 边界 | 真实数据丢失后如何合法补数据 | 已关闭 staging 路径，尚未接入训练 |
 | P-012 | 有加密函数但没有数据库与授权解密闭环 | Data Privacy 要求是否真的完成 | 已关闭赛题演示范围，生产治理仍受限 |
+| P-013 | LLM 相关性判断与点击行为混成一个分数 | 如何模拟用户而不伪造线上效果 | 已关闭协议实现，真人校准仍受限 |
 
 ## 3. 已关闭问题记录
 
@@ -315,6 +316,34 @@ fixture 验证官方响应到最小岗位契约的映射。来源与接入条件
 **遗留边界**：开发默认密码和主密钥只适合本机；尚无 OIDC、KMS/轮换、TLS 部署证据、
 访问审计、同意/撤回、保留期限、备份清除、SQLite 安全擦除和独立安全评审。因此只能
 说赛题演示条款已验证，不能宣称法规合规或生产安全。
+
+### P-013：LLM 相关性判断与点击行为混成一个分数
+
+**问题与影响**：若直接让 LLM 回答“用户会不会点击/是否有效”，模型会同时猜测岗位
+相关性、展示位置和行为噪声；若 prompt 再暴露推荐分数或 80% 目标，结果容易自证。
+这样的比例既不能解释排序问题，也会被误写成真实用户调查。
+
+**分析思路**：沿“不可观察偏好 → 是否观察 → 行为 → 反馈”拆分变量。先检查判断器
+能看到哪些字段，再检查 rank 如何进入行为模型，最后分别定义代理匹配率与合成行为率。
+参考 RecSim 的状态/响应分层和 position-bias 文献，但不移植外部参数或论文结果。
+
+**解决办法与取舍**：新增 `src/simulation/`。判断器只接收最小化 Persona 与岗位，
+不接收 rank、推荐分数、目标阈值或生成 oracle；LLM 输出经 Pydantic 校验，
+`effective` 由固定阈值派生，失败显式记录并退回透明基线。独立行为模型用单调位置
+观察概率与固定种子生成点击、收藏、投递和满意反馈；模拟结果不写线上事件库。
+
+**回归证据**：
+[`test_prompt_uses_minimal_payload_and_treats_job_text_as_untrusted`](../tests/test_user_simulation.py)
+验证输入最小化和岗位文本边界；
+[`test_llm_judgment_is_validated_and_effective_is_computed_by_code`](../tests/test_user_simulation.py)
+验证 schema 与代码派生；
+[`test_behavior_is_reproducible_and_position_probability_is_monotonic`](../tests/test_user_simulation.py)
+验证复现和位置单调性；聚合产物在
+[`../results/synthetic_user_simulation.json`](../results/synthetic_user_simulation.json)。
+
+**遗留边界**：外部 LLM 尚无真实运行产物，默认行为参数未经真人日志校准；没有多模型
+一致性、prompt 扰动、盲测人工评价或反事实策略评估。因此只能展示模拟器设计和协议
+测试，不能声明用户满意度、线上 CTR、赛题 80% 目标或生成式推荐效果。
 
 ## 4. 新问题的收录标准
 

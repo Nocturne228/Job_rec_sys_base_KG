@@ -231,6 +231,59 @@ flowchart TD
 的反馈，并拒绝同一曝光重复反馈。它仍不是旧赛题要求的真实用户调查，因为缺少样本
 人群、实验分组、曝光有效期、无响应处理和调查流程。
 
+### 6.1 合成用户评估协议
+
+历史赛题 PDF 的原文目标是“推荐有效性达到 **80%** 以上（用户调查）”，不是常用
+离线指标，也不是 85%。当前仓库把三个概念拆开，防止用代理数值替代真人调查：
+
+1. `ProxyEffectiveness@K`：固定规则判定的有效岗位数 / 被评估的 Top-K 岗位数。
+   `effective = hard_constraints_pass ∧ skill_fit≥4 ∧
+   willingness_to_consider≥4`。若全部判断来自外部 LLM，才可在技术讨论中称
+   `LLMProxyEffectiveness@K`。
+2. `SimulatedCTR@K`：合成点击数 / 合成曝光数。点击概率由
+   `P(examine at rank) × P(attractive | latent relevance, persona)` 构造。
+3. `SimulatedFeedbackEffectiveness`：合成满意反馈 / 有合成反馈的曝光。它模拟
+   调查口径，但仍不是用户调查，不能与 80% 目标直接比较。
+
+判断层接收最小化合成 Persona 和岗位字段，不接收 rank、推荐分数、目标阈值或数据
+生成器的 `compatibility_score`。LLM 只返回 1～5 分的技能、职位兴趣、成长空间和考虑
+意愿及证据；Pydantic 拒绝非法输出，代码固定派生 `effective`。岗位文本按不可信输入
+处理，外部服务失败时记录错误类别并显式使用确定性基线。行为层独立处理位置观察偏差，
+所以同一潜在相关性在更后位置有更低的边际点击概率。
+
+默认离线命令：
+
+```bash
+uv run python -m scripts.run_user_simulation \
+  --judge deterministic --users 20 --top-k 10
+```
+
+**已验证（2026-07-31）**：固定数据种子 42、行为种子 20260731、发布模型
+`semi-synthetic-v1-seed42`，20 个 Persona、200 个推荐曝光；确定性判断基线的
+`ProxyEffectiveness@10=0.120`，合成 `CTR@10=0.265`、收藏率 0.080、投递率
+0.025；26 条合成反馈中的满意比例为 0.4615。完整协议元数据和聚合值见
+[`../results/synthetic_user_simulation.json`](../results/synthetic_user_simulation.json)。
+这些数值由人工设定的行为参数与半合成 Persona 共同决定，只用于验证实现和暴露假设，
+不用于证明推荐效果。
+
+外部 LLM 路径通过 `--judge llm` 启用，使用 `JOBREC_LLM_ENDPOINT`、
+`JOBREC_LLM_API_KEY` 和 `JOBREC_LLM_MODEL`；当前状态为**已实现、环境受限**，没有
+保存一次真实外部模型运行，因此上面的 0.120 不能写成 LLM 评价结果。若未来执行，应
+记录模型版本、提示词版本、采样参数和 fallback 比例，并先用盲测人工小样本校准一致性。
+
+设计依据来自外部研究，不是本项目效果证据：
+
+- [RecSim](https://research.google/pubs/recsim-a-configurable-simulation-platform-for-recommender-systems/)
+  启发了偏好/状态与选择响应的可配置分层；
+- [Position Bias Estimation for Unbiased Learning to Rank](https://research.google/pubs/position-bias-estimation-for-unbiased-learning-to-rank-in-personal-search/)
+  支持把展示位置的观察概率与相关性分开；
+- [NAACL 2024 的 LLM 用户模拟评估](https://aclanthology.org/2024.naacl-long.83/)
+  提醒模型与 prompt 会改变代理行为，必须做协议敏感性检查；
+- [AAAI 2025 的 LLM 用户模拟器](https://ojs.aaai.org/index.php/AAAI/article/view/33456)
+  提供了 LLM 推理与统计参与度模型组合的外部案例；
+- [EACL 2026 的 realism gap 研究](https://aclanthology.org/2026.eacl-long.244/)
+  进一步说明 prompt-only 模拟与真实用户仍存在系统差距。
+
 ## 7. 多种子基线与消融
 
 **已验证：2026-07-19 重跑，结果与 2026-07-15 保留产物逐字节一致。** 命令：
@@ -277,7 +330,7 @@ feature hashing（产物沿用 `B3_sbert` 历史键名，但本次没有加载�
 
 ### 8.1 本地质量门禁
 
-**已验证日期：2026-07-30；环境：macOS、Python 3.13、锁定 uv 环境。**
+**已验证日期：2026-07-31；环境：macOS、Python 3.13、锁定 uv 环境。**
 
 ```bash
 uv run python -m compileall -q src scripts tests main.py
@@ -290,7 +343,7 @@ uv run mypy src/api/routes.py src/models/bundle.py src/data/graph_store.py \
   src/utils/crypto.py
 ```
 
-当前复核结果：21 个测试通过，`src` 总行覆盖率 59.10%，compile、Black、Isort 与
+当前复核结果：28 个测试通过，`src` 总行覆盖率 61.89%，compile、Black、Isort 与
 上述关键服务边界的 mypy 均通过。精确覆盖率快照见
 [`../results/coverage.json`](../results/coverage.json)。测试运行出现依赖侧弃用警告，
 不影响本次通过结论，但不应误报为“零警告”。
@@ -317,6 +370,8 @@ feature-hashing 编码器。协议为 100 个请求、并发 10：
 - Dockerfile 与 Compose 清单已静态提供，保留记录没有证明镜像实际构建和运行。
 - Neo4j 适配器、Cypher 和导入脚本已实现；没有外部 Neo4j 的集成与故障证据。
 - 可选预训练 Sentence-BERT 和外部 LLM 不在默认离线质量门禁中。
+- Persona-LLM 判断路径已实现，但当前只有 fake-adapter 契约测试和确定性基线产物；
+  未做真人校准、多模型一致性或外部模型稳定性评估。
 - 公平性模块只能展示指标计算，缺少合法真实群体属性与治理流程。
 - Data Privacy 已满足赛题四字段加密和授权解密演示要求；生产身份、KMS、审计、
   同意、保留、备份与安全擦除仍未验证。
