@@ -49,6 +49,7 @@ class JobPosting(BaseModel):
     )  # skill_id -> min_level
     preferred_skills: Dict[str, SkillLevel] = Field(default_factory=dict)
     salary_range: Optional[tuple[float, float]] = None
+    posted_at: str = "1970-01-01T00:00:00"
 
 
 class Application(BaseModel):
@@ -69,6 +70,27 @@ class Interaction(BaseModel):
     timestamp: str
 
 
+class FeedExposure(BaseModel):
+    """一次岗位内容流曝光及可观测结果。"""
+
+    impression_id: str
+    user_id: str
+    job_id: str
+    timestamp: str
+    position: int = Field(ge=1)
+    clicked: bool = False
+    dwell_seconds: float = Field(default=0.0, ge=0.0)
+    saved: bool = False
+    applied: bool = False
+
+    @property
+    def engaged(self) -> bool:
+        """Pointwise 排序标签；定义透明，不冒充真实业务目标。"""
+        return bool(
+            self.clicked or self.saved or self.applied or self.dwell_seconds >= 20.0
+        )
+
+
 class SkillRelation(BaseModel):
     """Typed, provenance-aware edge in the skill graph."""
 
@@ -87,4 +109,5 @@ class GraphEntities(BaseModel):
     skills: List[Skill]
     applications: List[Application]
     interactions: List[Interaction]
+    exposures: List[FeedExposure] = Field(default_factory=list)
     skill_relations: List[SkillRelation] = Field(default_factory=list)

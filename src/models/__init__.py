@@ -1,10 +1,10 @@
-"""
-Additional model architectures for the job recommendation system.
-"""
+"""离线发布契约。"""
 
-from .gat import GATLayer, GraphAttentionNetwork, MultiHeadGATLayer
+from .bundle import ModelBundle, data_fingerprint, serving_fingerprint, sha256_file
 
-__all__ = ["GraphAttentionNetwork", "GATLayer", "MultiHeadGATLayer"]
-from .bundle import ModelBundle, StaticSkillWeighter
-
-__all__ = ["ModelBundle", "StaticSkillWeighter"]
+__all__ = [
+    "ModelBundle",
+    "data_fingerprint",
+    "serving_fingerprint",
+    "sha256_file",
+]

@@ -2,12 +2,14 @@
 Generate mock data for the job recommendation system.
 """
 
+import math
 import random
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 from .models import (
     Application,
+    FeedExposure,
     GraphEntities,
     Interaction,
     JobPosting,
@@ -359,6 +361,10 @@ def generate_jobs(num_jobs: int = 50) -> List[JobPosting]:
                 required_skills=required_skills,
                 preferred_skills=preferred_skills,
                 salary_range=(min_salary, max_salary),
+                posted_at=(
+                    datetime(2024, 1, 1, 12, 0, 0)
+                    - timedelta(days=random.randint(0, 45))
+                ).isoformat(),
             )
         )
 
@@ -444,6 +450,80 @@ def generate_interactions(
     return interactions
 
 
+def generate_feed_exposures(
+    users: List[User],
+    jobs: List[JobPosting],
+    reference_time: Optional[datetime] = None,
+) -> List[FeedExposure]:
+    """生成带位置偏差和显式负反馈的岗位内容流曝光。"""
+    reference_time = reference_time or datetime.now()
+    exposures: List[FeedExposure] = []
+    for user in users:
+        sampled_jobs = random.sample(jobs, min(len(jobs), max(12, len(jobs) // 2)))
+        for sequence, job in enumerate(sampled_jobs):
+            match = compatibility_score(user, job)
+            position = random.randint(1, 20)
+            position_penalty = 0.055 * math.log2(position + 1)
+            click_probability = min(
+                0.92, max(0.03, 0.10 + 0.68 * match - position_penalty)
+            )
+            clicked = random.random() < click_probability
+            dwell_seconds = (
+                random.uniform(8.0, 18.0) + match * random.uniform(15.0, 55.0)
+                if clicked
+                else random.uniform(0.5, 8.0)
+            )
+            saved = clicked and random.random() < 0.04 + 0.28 * match
+            applied = saved and random.random() < 0.03 + 0.22 * match
+            timestamp = (
+                reference_time
+                - timedelta(
+                    days=random.randint(0, 30),
+                    hours=random.randint(0, 23),
+                    minutes=random.randint(0, 59),
+                )
+            ).isoformat()
+            exposures.append(
+                FeedExposure(
+                    impression_id=f"offline-{user.id}-{sequence:03d}",
+                    user_id=user.id,
+                    job_id=job.id,
+                    timestamp=timestamp,
+                    position=position,
+                    clicked=clicked,
+                    dwell_seconds=round(dwell_seconds, 3),
+                    saved=saved,
+                    applied=applied,
+                )
+            )
+    return exposures
+
+
+def interactions_from_exposures(exposures: List[FeedExposure]) -> List[Interaction]:
+    """仅把曝光后的正向动作转为协同图边，跳过曝光保留为排序负例。"""
+    interactions: List[Interaction] = []
+    for exposure in exposures:
+        if exposure.applied:
+            interaction_type = "apply"
+        elif exposure.saved:
+            interaction_type = "save"
+        elif exposure.clicked:
+            interaction_type = "click"
+        elif exposure.dwell_seconds >= 20.0:
+            interaction_type = "view"
+        else:
+            continue
+        interactions.append(
+            Interaction(
+                user_id=exposure.user_id,
+                job_id=exposure.job_id,
+                interaction_type=interaction_type,
+                timestamp=exposure.timestamp,
+            )
+        )
+    return interactions
+
+
 def generate_mock_data(
     num_users: int = 20, num_jobs: int = 50, seed: Optional[int] = 42
 ) -> GraphEntities:
@@ -462,9 +542,8 @@ def generate_mock_data(
     applications = generate_applications(
         users, jobs, application_rate=0.2, reference_time=reference_time
     )
-    interactions = generate_interactions(
-        users, jobs, interaction_rate=0.3, reference_time=reference_time
-    )
+    exposures = generate_feed_exposures(users, jobs, reference_time=reference_time)
+    interactions = interactions_from_exposures(exposures)
 
     return GraphEntities(
         users=users,
@@ -472,5 +551,6 @@ def generate_mock_data(
         skills=skills,
         applications=applications,
         interactions=interactions,
+        exposures=exposures,
         skill_relations=generate_skill_relations(),
     )

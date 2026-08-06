@@ -6,7 +6,7 @@ from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-from scipy import sparse
+from scipy import sparse  # type: ignore[import-untyped]
 
 from .models import GraphEntities, JobPosting, Skill, User
 
@@ -37,12 +37,9 @@ class DataLoader:
     def _process_data(self) -> None:
         """Process data and create mappings."""
         # Filter users and jobs with sufficient interactions
-        user_interaction_counts = defaultdict(int)
-        job_interaction_counts = defaultdict(int)
-
+        user_interaction_counts: defaultdict[str, int] = defaultdict(int)
         for interaction in self.data.interactions:
             user_interaction_counts[interaction.user_id] += 1
-            job_interaction_counts[interaction.job_id] += 1
 
         # Filter users and jobs
         self.users = [
@@ -50,11 +47,8 @@ class DataLoader:
             for u in self.data.users
             if user_interaction_counts[u.id] >= self.min_interactions
         ]
-        self.jobs = [
-            j
-            for j in self.data.jobs
-            if job_interaction_counts[j.id] >= self.min_interactions
-        ]
+        # 内容型推荐必须保留尚无协同边的新岗位；它们可由文本、技能和新鲜度召回。
+        self.jobs = list(self.data.jobs)
 
         # Create mappings
         self.user_id_to_idx = {user.id: idx for idx, user in enumerate(self.users)}
@@ -90,36 +84,49 @@ class DataLoader:
         self._create_train_test_split()
 
     def _create_train_test_split(self) -> None:
-        """Create a reproducible per-user holdout split.
+        """Create a reproducible per-user temporal holdout split.
 
         Each user with at least two interactions keeps at least one training
-        edge. A global random split can place all of a user's observations in
-        test, inadvertently evaluating a cold-start user instead of ranking.
+        edge. Sorting within each user avoids future positive edges entering
+        the collaborative training graph.
         """
         if not 0.0 <= self.test_ratio < 1.0:
             raise ValueError("test_ratio must be in [0, 1).")
 
-        rng = np.random.default_rng(self.random_seed)
         train_interactions: List[Tuple[int, int]] = []
         test_interactions: List[Tuple[int, int]] = []
+        timestamps = {
+            (
+                self.user_id_to_idx[interaction.user_id],
+                self.job_id_to_idx[interaction.job_id],
+            ): interaction.timestamp
+            for interaction in self.data.interactions
+            if interaction.user_id in self.user_id_to_idx
+            and interaction.job_id in self.job_id_to_idx
+        }
         for user_idx in range(self.n_users):
-            item_indices = self.R[user_idx].indices.copy()
+            item_indices = sorted(
+                self.R[user_idx].indices.tolist(),
+                key=lambda item_idx: (
+                    timestamps.get((user_idx, item_idx), ""),
+                    item_idx,
+                ),
+            )
             if len(item_indices) < 2:
                 train_interactions.extend(
                     (user_idx, item_idx) for item_idx in item_indices
                 )
                 continue
 
-            rng.shuffle(item_indices)
             n_test = min(
                 max(1, int(round(len(item_indices) * self.test_ratio))),
                 len(item_indices) - 1,
             )
             test_interactions.extend(
-                (user_idx, item_idx) for item_idx in item_indices[:n_test]
+                (user_idx, item_idx) for item_idx in item_indices[-n_test:]
             )
             train_interactions.extend(
-                (user_idx, item_idx) for item_idx in item_indices[n_test:]
+                (user_idx, item_idx) for item_idx in item_indices[:-n_test]
             )
 
         # Create train matrix
@@ -137,29 +144,54 @@ class DataLoader:
         # Test user indices
         self.test_users = list(set([u for u, _ in test_interactions]))
 
+        # 排序样本同样按时间留出；训练样本额外排除协同测试正例。
+        test_pairs = set(test_interactions)
+        self.train_exposures = []
+        self.test_exposures = []
+        exposures_by_user: Dict[str, List[Any]] = defaultdict(list)
+        for exposure in self.data.exposures:
+            if exposure.user_id in self.user_id_to_idx:
+                exposures_by_user[exposure.user_id].append(exposure)
+        for user_id, exposures in exposures_by_user.items():
+            ordered = sorted(exposures, key=lambda row: row.timestamp)
+            if len(ordered) < 2:
+                self.train_exposures.extend(ordered)
+                continue
+            n_test = min(
+                max(1, int(round(len(ordered) * self.test_ratio))),
+                len(ordered) - 1,
+            )
+            user_idx = self.user_id_to_idx[user_id]
+            for exposure in ordered[:-n_test]:
+                pair = (user_idx, self.job_id_to_idx[exposure.job_id])
+                if pair not in test_pairs:
+                    self.train_exposures.append(exposure)
+            self.test_exposures.extend(ordered[-n_test:])
+
     def get_sparse_graph(self) -> sparse.csr_matrix:
         """Get sparse adjacency matrix for LightGCN."""
         # Create bipartite adjacency matrix
         # A = [0, R; R^T, 0]
         n_total = self.n_users + self.n_jobs
 
+        # 标准 LightGCN 使用二值二部图；动作强度留给排序特征，不改变传播算子。
+        binary_train = (self.train_R > 0).astype(np.float32)
+
         # Top-right block: R
         A = sparse.lil_matrix((n_total, n_total), dtype=np.float32)
-        A[: self.n_users, self.n_users :] = self.train_R
+        A[: self.n_users, self.n_users :] = binary_train
 
         # Bottom-left block: R^T
-        A[self.n_users :, : self.n_users] = self.train_R.T
+        A[self.n_users :, : self.n_users] = binary_train.T
 
         # Convert to CSR
         A = A.tocsr()
 
-        # Add self-loops
-        A = A + sparse.eye(n_total, dtype=np.float32)
-
         # Normalize adjacency matrix (D^(-1/2) A D^(-1/2))
         rowsum = np.array(A.sum(axis=1)).flatten()
-        d_inv_sqrt = np.power(rowsum, -0.5).flatten()
-        d_inv_sqrt[np.isinf(d_inv_sqrt)] = 0.0
+        d_inv_sqrt = np.zeros_like(rowsum)
+        nonzero = rowsum > 0
+        d_inv_sqrt[nonzero] = np.power(rowsum[nonzero], -0.5)
         D_inv_sqrt = sparse.diags(d_inv_sqrt)
 
         normalized_A = D_inv_sqrt @ A @ D_inv_sqrt
@@ -178,7 +210,7 @@ class DataLoader:
 
 
 class GraphLoader:
-    """Simulate Neo4j graph queries for skill-based retrieval."""
+    """在内存类型化技能图上计算差距和学习路径。"""
 
     def __init__(self, data: GraphEntities):
         self.data = data
@@ -189,17 +221,13 @@ class GraphLoader:
         }
 
         # Build user-skill graph
-        self.user_skills: Dict[str, Dict[str, str]] = {}  # user_id -> {skill_id: level}
+        self.user_skills: Dict[str, Dict[str, Any]] = {}  # user_id -> skill levels
         for user in data.users:
             self.user_skills[user.id] = user.skills
 
         # Build job-skill graph
-        self.job_required_skills: Dict[str, Dict[str, str]] = (
-            {}
-        )  # job_id -> {skill_id: min_level}
-        self.job_preferred_skills: Dict[str, Dict[str, str]] = (
-            {}
-        )  # job_id -> {skill_id: min_level}
+        self.job_required_skills: Dict[str, Dict[str, Any]] = {}
+        self.job_preferred_skills: Dict[str, Dict[str, Any]] = {}
         for job in data.jobs:
             self.job_required_skills[job.id] = job.required_skills
             self.job_preferred_skills[job.id] = job.preferred_skills
@@ -210,17 +238,19 @@ class GraphLoader:
             for edge in self.skill_relations
         }
 
-    def get_user_skills(self, user_id: str) -> Dict[str, str]:
+    def get_user_skills(self, user_id: str) -> Dict[str, Any]:
         """Get skills for a user."""
         return self.user_skills.get(user_id, {})
 
-    def get_job_skills(self, job_id: str) -> Tuple[Dict[str, str], Dict[str, str]]:
+    def get_job_skills(self, job_id: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Get required and preferred skills for a job."""
         required = self.job_required_skills.get(job_id, {})
         preferred = self.job_preferred_skills.get(job_id, {})
         return required, preferred
 
-    def get_skill_gap(self, user_id: str, job_id: str) -> Dict[str, Tuple[str, str]]:
+    def get_skill_gap(
+        self, user_id: str, job_id: str
+    ) -> Dict[str, Tuple[Optional[str], str]]:
         """
         Calculate skill gap between user and job.
         Returns: {skill_id: (user_level, required_level)}
@@ -228,7 +258,7 @@ class GraphLoader:
         user_skills = self.get_user_skills(user_id)
         required_skills, preferred_skills = self.get_job_skills(job_id)
 
-        skill_gap = {}
+        skill_gap: Dict[str, Tuple[Optional[str], str]] = {}
 
         # Check required skills
         for skill_id, required_level in required_skills.items():
@@ -253,11 +283,7 @@ class GraphLoader:
         self, user_id: str, job_id: str, max_path_length: int = 3
     ) -> List[List[str]]:
         """
-        Simulate finding shortest paths in skill graph via BFS on the
-        prerequisite edges defined in job_associations.
-
-        In a real Neo4j implementation, this would be:
-            MATCH path = shortestPath((uSkill)-[*1..3]-(jSkill)) RETURN path
+        Find directed shortest paths on prerequisite edges via BFS.
         """
         user_skill_names = list(self.get_user_skills(user_id).keys())
         required_skills, _ = self.get_job_skills(job_id)

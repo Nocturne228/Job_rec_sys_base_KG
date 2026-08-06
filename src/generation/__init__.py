@@ -1,24 +1,17 @@
-"""
-Generation layer for personalized career advice using GraphRAG and LLM.
-"""
+"""证据受限的兴趣扩展；外部 LLM 可选，默认确定性降级。"""
 
-from .adapters import (
-    CareerAdvice,
-    LearningStep,
-    OpenAICompatibleLLM,
-    fallback_advice,
-    validate_advice,
+from .profile_expansion import (
+    DeterministicProfileExpander,
+    ExpansionResult,
+    InterestProfile,
+    OpenAICompatibleProfileExpander,
+    ResilientProfileExpander,
 )
-from .langgraph_workflow import CareerAdvisorWorkflow, WorkflowState
-from .llm_simulator import LLMSimulator
 
 __all__ = [
-    "CareerAdvisorWorkflow",
-    "WorkflowState",
-    "LLMSimulator",
-    "CareerAdvice",
-    "LearningStep",
-    "OpenAICompatibleLLM",
-    "fallback_advice",
-    "validate_advice",
+    "DeterministicProfileExpander",
+    "ExpansionResult",
+    "InterestProfile",
+    "OpenAICompatibleProfileExpander",
+    "ResilientProfileExpander",
 ]

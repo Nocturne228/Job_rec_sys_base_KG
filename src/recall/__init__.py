@@ -1,10 +1,13 @@
-"""
-Recall layer for job recommendation system.
-Includes LightGCN for collaborative filtering and SBERT for semantic recall.
-"""
+"""LightGCN 协同信号与离线文本信号。"""
 
-from .ensemble_recall import EnsembleRecall
 from .lightgcn import LightGCN
-from .sbert_recall import SBERTRecall
+from .multi_route import Candidate, RecallEvidence, merge_recall_routes
+from .text_recall import TextRecall
 
-__all__ = ["LightGCN", "SBERTRecall", "EnsembleRecall"]
+__all__ = [
+    "Candidate",
+    "LightGCN",
+    "RecallEvidence",
+    "TextRecall",
+    "merge_recall_routes",
+]

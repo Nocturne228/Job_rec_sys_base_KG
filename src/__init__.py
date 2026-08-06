@@ -1,3 +1,1 @@
-"""
-Job Recommendation System - Based on Graph Learning and LLM
-"""
+"""面试叙事优先的可解释岗位推荐原型。"""

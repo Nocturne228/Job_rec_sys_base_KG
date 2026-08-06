@@ -1,392 +1,146 @@
-# 数据、实验协议与验证结果
+# 数据、指标与证据
 
-> 状态：数据语义和数值证据的唯一详细说明。机器可读结果以 `../results/` 为准。
+本文是数据语义和数值结论的唯一详细来源。实测位于
+[`../results/experiment_summary.json`](../results/experiment_summary.json)；推导/预期不写入
+结果文件。
 
-## 1. 数据事实与适用边界
+## 1. 半合成曝光数据
 
-原始真实数据已经丢失，仓库没有可恢复的真实简历、岗位、投递、面试或线上曝光日志。
-当前默认数据由 `src/data/generator.py` 按固定种子生成，属于**半合成开发数据**。
+原始真实数据已经丢失。固定种子生成用户、岗位、技能、发布时间、先修关系和 Feed
+曝光。每次曝光包含 `timestamp`、`position`、`clicked`、`dwell_seconds`、`saved` 和
+`applied`。点击概率由透明技能兼容度、噪声和位置衰减共同影响；推荐模型看不到生成器
+内部的 oracle。
 
-它可以支持：
+排序正例定义为：
 
-- 构造稳定的实体、关系和交互以运行完整链路；
-- 验证切分、负采样、seen masking、指标和模型发布契约；
-- 比较同一生成分布、候选池和种子策略下的基线与消融；
-- 演示 API、解释、反馈持久化和外部适配器边界。
+```text
+clicked OR saved OR applied OR dwell_seconds >= 20
+```
 
-它不能支持：
+未满足条件的曝光是排序负例；只有正向动作生成 LightGCN 协同边。服务 Bundle 使用
+20 用户 × 50 岗位；实验每个种子使用 40 用户 × 100 岗位。五个种子的排序训练曝光约
+1551–1588 条，正例率约 10.3%–12.4%。
 
-- 真实求职者的推荐有效性、投递率、面试率或满意度结论；
-- 真实市场分布、冷启动难度、季节性和反馈偏差估计；
-- 受保护群体公平性、隐私合规或真实个人数据安全结论；
-- 生产数据规模、吞吐、可用性、成本或服务等级结论。
+该分布适合验证曝光样本、时间切分、多阶段接口和负面消融，不代表抖音或真实招聘流量。
 
-旧材料中的真实规模或业务指标统一视为**历史未验证**，不进入当前实验基线。
+## 2. 时间切分和防泄漏
 
-## 2. 数据域与可执行契约
+每个用户的正向交互按 ISO 时间排序，最后约 20% 作为 `test_R`，其余进入 `train_R`；
+至少保留一条训练边。随后：
 
-实体字段由 `src/data/models.py` 的 Pydantic 模型定义；本文说明语义，不复制完整
-schema。
+1. LightGCN 二值邻接图和 BPR 正例只来自 `train_R`；
+2. BPR 负样本只能来自该用户训练期未见岗位；
+3. 热度和近期五条行为兴趣只使用训练交互；
+4. Pointwise 只使用训练期曝光，并排除协同测试正例；
+5. 离线评估和在线已知用户都先屏蔽 seen，再构造候选与排序特征；
+6. 无协同交互岗位仍保留在完整目录中。
 
-| 数据域 | 当前来源 | 主要用途 | 若未来获得合法新数据时的缺口 |
-|---|---|---|---|
-| 用户/简历 | 固定种子生成 | 文本召回、技能覆盖、能力评估 | 授权采集、解析/NER、身份和保留治理 |
-| 岗位 | 固定种子生成 | 文本召回、技能匹配、反向匹配 | 合法 feed、时效、去重、地区/币种/类型 |
-| 技能 | 维护中的演示词表 | 用户/岗位画像、GAT、解释 | 版本化本体、别名消歧和专家治理 |
-| 技能关系 | 人工定义类型边 | 学习路径证据 | 来源审查、有效期、版本和复核状态 |
-| 交互 | 兼容度驱动模拟 | LightGCN、离线评估、趋势 | 唯一事件、曝光 ID、时间语义、去重和偏差处理 |
-| 在线事件 | API 本地写入 | 唯一曝光后的反馈诊断 | 持久事件平台、同意、删除、实验和迟到事件规则 |
-| 私密个人档案 | API 演示输入 | 验证赛题四字段加密与授权解密 | 托管身份/KMS、同意、保留、备份和安全擦除 |
+曝光和正向交互并不是完整真实日志，排序训练特征仍是训练窗口末端快照，而不是为每条
+历史曝光重放当时状态；因此当前只能称时间留出原型，不能声称完成严格 point-in-time
+特征回放。
 
-### 2.1 核心实体
+## 3. 模型和阶段
 
-- `Skill`：稳定 ID、展示名、类别和可选说明；等级为 `beginner`、
-  `intermediate`、`advanced`、`expert`。
-- `User`：内部 ID、演示姓名、教育/经验、技能映射和简历文本。简历文本在真实场景
-  中属于敏感数据；当前 API 只做确定性词表匹配，不支持文件上传、OCR 或训练过的 NER。
-- `JobPosting`：ID、标题、公司、描述、必需/加分技能和可选薪资范围。生成器把结构化
-  技能名写入 JD，保证文本与结构化字段不自相矛盾。
-- `Interaction`：用户、岗位、类型、时间。类型为 `view`、`click`、`save`、`apply`；
-  稀疏矩阵对同一用户/岗位保留最强权重 0.5、1.0、1.5、2.0。这些权重是建模假设，
-  不是转化率。
-- `SkillRelation`：`source_skill_id -> target_skill_id` 表示
-  `PREREQUISITE_OF`，同时保留 `[0,1]` 置信度和来源。
+| 名称 | 定义 |
+|---|---|
+| Random | 用户级固定种子随机分数 |
+| Popularity | 训练正向交互列和 |
+| Skill | 等级感知必需/加分技能覆盖 |
+| Text | 512 维 unigram/bigram feature hashing |
+| LightGCN | 32 维、2 层、二值二部图、BPR |
+| Fusion | 候选内归一化的 0.4/0.3/0.3 协同/文本/技能基线 |
+| Pointwise | 六特征标准化 Logistic 排序 |
+| Multistage Feed | 四路各 Top-20 合并、Pointwise、确定性重排 |
 
-### 2.2 本地产物
+Pointwise 的六项特征为协同、文本、技能、热度、新鲜度和近期兴趣。排序权重从训练曝光
+学习；当前不是 DeepFM、DIN、Transformer 或多任务模型。
 
-| 产物 | 用途 | 生命周期 |
-|---|---|---|
-| `data/mock_data.pkl` | 可重建 `GraphEntities` 快照 | 可信本地 pickle，不是正式数据集 |
-| `data/jobrec_events.sqlite3` | 曝光和反馈运行状态 | 被 Git 忽略，可随本机演示重建 |
-| `data/jobrec_profiles.sqlite3` | 姓名/手机/邮箱/地址的 AES-GCM 密文 | 被 Git 忽略；默认开发密钥不可用于共享部署 |
-| `models/jobrec_bundle.json` | 在线映射、seen set、权重和版本 | 发布契约 |
-| `models/lightgcn_model.pt` | bundle 引用的 checkpoint | 与 bundle 成对生成 |
-| `results/experiment_summary.json` | 五种子基线/消融 | 当前实验数值来源 |
-| `results/coverage.json` | 记录运行的覆盖率明细 | 质量证据快照 |
-| `results/load_test_summary.json` | 单机 API 负载冒烟 | 协议限定的性能证据 |
+## 4. 指标定义
 
-不要反序列化不可信 pickle/checkpoint，不要手工编辑模型权重和结果数字。
+- `Recall@10`：用户测试相关岗位出现在 Top-10 的比例，再对测试用户平均；
+- `NDCG@10`：二值相关性的折损累计增益；
+- `MRR@10`：第一个相关岗位排名的倒数；
+- `Candidate Recall@80`：四路各 Top-20 合并候选对测试相关岗位的覆盖；80 是各路上限
+  之和，去重后实际候选通常更少；
+- `Catalogue Coverage@10`：所有用户 Top-10 中不同岗位数除以目录岗位数；
+- `Intra-list Diversity@10`：Top-10 岗位两两技能 Jaccard 距离均值；
+- `Fresh Job Share@10`：Top-10 中距离目录最新发布时间不超过 14 天的比例。
 
-### 2.3 赛题 Data Privacy 验收矩阵
+反馈 API 的 `satisfaction_rate` 只统计显式提供满意度的已记录反馈，不是 CTR。点击、停留、
+收藏和投递可以独立记录，但当前没有线上聚合结论。
 
-事实来源为 [`../ref/赛题.pdf`](../ref/赛题.pdf) PDF 第 3 页、印刷页码 71。原文有两层
-要求：用户期望中要求保护简历个人数据、不侵犯隐私；技术指标要求数据库中姓名、手机、
-邮箱、通讯地址等至少四项加密，且只能由授权人员解密。
+## 5. 五种子实测
 
-| 赛题要求 | 当前实现 | 回归证据 | 结论 |
-|---|---|---|---|
-| 简历个人数据安全 | `resume_text` 只在请求内做技能提取/召回，不写入 SQLite 事件或档案；日志不记录请求体 | API 契约测试；代码审查 | **已验证（演示路径）** |
-| 至少四项数据库加密 | `private_profiles` 只保存 `name/phone/email/address` 四列 AES-GCM 密文 | 数据库文件无四项明文断言、随机密文往返测试 | **已验证** |
-| 只能由授权人员解密 | 仅本人或 admin 可写、读、删；recruiter 和其他用户均返回 403；三类角色使用独立密码来源 | API 权限契约测试 | **已验证（演示 RBAC）** |
-| 密文篡改与调换拒绝 | 随机 salt/nonce；PBKDF2；AAD 绑定 `user_id + field` | 调换姓名/邮箱密文后认证失败 | **已验证** |
-
-这里的“完成”只针对赛题明确的功能验收范围，不等于真实个人数据治理或法规认证。
-共享部署仍缺 OIDC、KMS、密钥轮换、TLS 终止策略、访问审计、同意/撤回、保留期限、
-备份清除和 SQLite 安全擦除。当前测试只使用生成/构造数据。
-
-## 3. 外部数据获取与隔离准备
-
-**已实现**：仓库提供来源无关的岗位/交互 JSONL 契约、引用校验、HMAC 用户 ID
-伪名化、输入 SHA-256 和 lineage manifest。**未实现**：外部数据到
-`GraphEntities`、训练、评估和在线 bundle 的自动切换；因此导入成功不能写成模型已在
-该数据上训练。
-
-### 3.1 可获取来源与用途
-
-下表在 2026-07-30 按官方页面核对；下载前仍须复核最新条款和版本。
-
-| 需要的数据 | 可选来源 | 适合用途 | 许可与限制 |
-|---|---|---|---|
-| 技能、职业、职业—技能关系 | [ESCO 下载/API](https://esco.ec.europa.eu/en/use-esco) | 多语言技能本体、稳定 URI、岗位技能映射 | 官方提供 CSV/ODS/RDF 与 API；固定版本并保留 attribution/适用许可 |
-| 职业与技能要求 | [O*NET Database](https://www.onetcenter.org/database.html) | 北美职业画像、技能/知识维度、外部本体对照 | 当前数据库页面标明 CC BY 4.0；须标注 O*NET 数据和 USDOL/ETA，记录具体版本 |
-| 当前公开岗位 | [USAJOBS Search API](https://developer.usajobs.gov/api-reference/get-api-search) | 岗位文本、组织、公开 URL、抓取/去重演示 | 需要注册邮箱和 API key；用途受 [API Terms](https://developer.usajobs.gov/guides/terms-of-use) 约束，不等同开放再分发许可 |
-| 岗位推荐交互 | [XING RecSys Challenge 2017](https://www.recsyschallenge.com/2017/) | 曝光/点击/收藏/申请的离线协议研究 | All rights reserved、仅学术使用、禁止分享和商业用途；只有仍可合法获准时才在本地使用 |
-
-这些来源彼此不能天然拼接：ESCO/O*NET 是本体或职业统计，USAJOBS 是公开岗位快照，
-XING 是受限的匿名交互。把它们映射到同一 skill ID、用户/岗位空间仍是新的数据工程
-工作，不能用标题相似或随机关联伪造“真实交互”。
-
-不建议从招聘网站、社交网络或个人主页抓取简历。若需用户侧数据，应使用自己取得明确
-同意的最小化样本，先定义目的、保留、删除和撤回流程；公开可见不等于允许批量训练。
-
-### 3.2 USAJOBS 获取与标准化
-
-先在终端之外通过本机 secret manager 或受控环境配置 `USAJOBS_EMAIL` 和
-`USAJOBS_API_KEY`，再执行：
+**已验证日期：2026-08-02。** 命令：
 
 ```bash
-uv run python -m scripts.fetch_usajobs \
-  --keyword "software data" \
-  --pages 2 \
-  --output data/external/raw/usajobs-jobs.jsonl
+uv run python main.py experiments
 ```
 
-脚本只调用官方 Search API，并转换为 `ExternalJob` JSONL。USAJOBS 当前响应没有项目
-所需的规范化技能等级，所以 `required_skills`、`preferred_skills` 保持为空；不能用
-关键词命中冒充已验证的技能标签。随后生成受校验的 staging snapshot：
+协议：种子 `11,19,23,31,42`；40 用户、100 岗位；LightGCN 15 epoch；逐用户时间
+留出；seen masking；四路召回各 Top-20。
 
-```bash
-uv run python -m scripts.prepare_external_dataset \
-  --jobs data/external/raw/usajobs-jobs.jsonl \
-  --output-dir data/external/normalized/usajobs \
-  --source-name USAJOBS \
-  --source-url https://developer.usajobs.gov/api-reference/get-api-search \
-  --license-name "USAJOBS API Terms" \
-  --license-url https://developer.usajobs.gov/guides/terms-of-use \
-  --retrieved-at 2026-07-30
-```
+| 模型 | Recall@10 | NDCG@10 | MRR@10 | Diversity@10 | Fresh Share@10 | Coverage@10 |
+|---|---:|---:|---:|---:|---:|---:|
+| Random | 0.1011 | 0.0478 | 0.0392 | 0.8656 | 0.3229 | 0.990 |
+| Popularity | 0.0958 | 0.0469 | 0.0369 | 0.8591 | 0.4182 | 0.140 |
+| Skill | 0.2509 | 0.1358 | 0.1137 | 0.8399 | 0.3107 | 0.888 |
+| Text | 0.2202 | 0.1043 | 0.0749 | 0.7950 | 0.3457 | 0.846 |
+| LightGCN | 0.1144 | 0.0519 | 0.0396 | 0.8649 | 0.3456 | 0.936 |
+| Fusion | **0.2551** | **0.1376** | **0.1159** | 0.8225 | 0.3345 | 0.946 |
+| Pointwise | 0.1410 | 0.0764 | 0.0652 | 0.8433 | 0.3745 | 0.826 |
+| Multistage Feed | 0.1436 | 0.0773 | 0.0652 | 0.8445 | 0.3766 | 0.826 |
 
-输出目录包含 `jobs.jsonl`、空的 `interactions.jsonl` 和 `manifest.json`。manifest
-记录来源、许可、获取/准备时间、行数、输入哈希和不能外推的边界。整个
-`data/external/` 被 Git 忽略。
+Multistage Feed 的 `Candidate Recall@80 = 0.7109`。表中是五种子均值；标准差和逐种子
+值见机器可读结果。
 
-### 3.3 自有或获准交互的本地准备
+### 可以得出的结论
 
-交互输入每行只允许：
+- 固定权重融合仍最好，说明透明的领域先验在小型半合成数据上优于学得模型；
+- Pointwise 明显低于 Fusion，约 10% 正例率、静态训练快照和有限曝光不足以证明学习
+  排序优势；
+- 多阶段候选损失了约 29% 测试相关项，显示每路 Top-20 是明确的效果/计算取舍；
+- 重排相对 Pointwise 的多样性和新岗位占比只小幅增加，链路有效但效果很弱；
+- LightGCN 单路在当前技能驱动且稀疏的分布上没有优势。
 
-```json
-{"user_id":"source-local-id","job_id":"usajobs:ABC","interaction_type":"click","timestamp":"2026-07-30T10:00:00Z"}
-```
+### 不能得出的结论
 
-`job_id` 必须引用同批岗位，类型只能是 `view/click/save/apply`。在受控环境配置
-`JOBREC_IMPORT_PSEUDONYM_KEY` 后，将 `--interactions` 传给同一准备脚本；缺少 key、
-引用未知岗位或 schema 非法时会失败。输出只保留 HMAC 伪名 ID，原始 ID 不写入
-normalized snapshot。
+- 不能外推真实 CTR、停留时长、投递或面试效果；
+- 不能证明 Logistic 排序在真实数据中弱于固定融合；
+- 五个生成种子不是五份独立真实数据，没有统计显著性结论；
+- 当前没有外部 LLM 运行产物，不能声称兴趣扩展提高召回；
+- 多样性和新岗位比例不是公平性、生态健康或业务价值认证。
 
-伪名化不等于匿名化，也不能代替访问控制、删除映射和同意管理。XING 等受限数据不得
-提交到仓库或共享 normalized snapshot。对应构造式测试位于
-`tests/test_external_data_and_cli.py`。
+## 6. 模型产物
 
-### 3.4 接入训练前的完成条件
+Bundle v3 的 `serving_sha256` 覆盖数据、checkpoint、Pointwise 参数、文本配置和重排配置。
+当前发布版本为 `jobrec-feed-07a2a9ac74aae85e`，排序训练使用 372 条曝光、39 条正例。
+服务还校验完整数据哈希、checkpoint 哈希、ID 映射和张量维度。
 
-外部 snapshot 真正进入模型前，至少还要：
+服务仍通过固定 seed 重新生成演示目录并校验哈希，不是可移植真实数据快照；接入真实
+数据后应发布不可变 catalog/feature snapshot。
 
-1. 版本化技能别名/本体映射，并人工抽样复核；
-2. 定义岗位时效、重复公告和撤回规则；
-3. 按事件时间切分，保存候选池与曝光语义；
-4. 让 bundle 记录 snapshot manifest 哈希、代码版本和转换配置；
-5. 在新数据上重跑简单基线、泄漏反例和分层诊断；
-6. 独立评估许可、个人数据、保留/删除和受保护属性治理。
+## 7. 工程验证
 
-在上述闭环完成前，外部脚本的证据标签只能是“数据准备路径**已实现**”，不是
-“真实数据效果**已验证**”。
-
-## 4. 半合成生成协议
-
-默认生成器创建用户、岗位、技能、类型化关系、申请和交互。交互概率与强度由一个只在
-生成阶段使用的 compatibility oracle 调节，信号包括：
-
-- 必需技能的等级覆盖；
-- 加分技能重合；
-- 有界的经验匹配项。
-
-这样做的目的不是模拟真实劳动力市场，而是让测试数据存在透明的可学习信号，避免用
-完全随机交互评价推荐器。oracle 不进入模型特征，也不直接作为测试标签。
-
-构造式测试验证观察交互对的平均 compatibility 明显高于未观察对，并验证生成 JD
-包含其结构化必需技能。改变生成概率或分布时必须更新测试与本文。
-
-## 5. 加载、切分与防泄漏协议
-
-```mermaid
-flowchart TD
-  A["Pydantic 校验后的 GraphEntities"] --> B["按最小交互过滤"]
-  B --> C["建立连续用户/岗位映射"]
-  C --> D["加权稀疏矩阵 R"]
-  D --> E["固定种子逐用户留出"]
-  E --> F["train_R"]
-  E --> G["test_R"]
-  F --> H["训练邻接图"]
-  H --> I["LightGCN/BPR"]
-  F --> J["服务 seen set"]
-  G --> K["屏蔽 seen 后的排序评估"]
-  J --> K
-```
-
-`src/data/loader.py` 必须满足：
-
-1. `test_ratio` 位于 `[0,1)`；
-2. 少于两次交互的用户只进入训练集；
-3. 每个评估用户至少保留一个训练交互和一个测试正例；
-4. `train_R + test_R` 的非零项与过滤后的原矩阵一致；
-5. LightGCN 邻接只由 `train_R` 生成；
-6. 评估和服务屏蔽该用户所有训练期岗位；
-7. BPR 负候选排除该用户观察过的岗位；无合法负样本的用户从该批次剔除。
-
-测试位于 `tests/test_core_pipeline.py`、`tests/test_data_graph_and_ranking.py` 和
-`tests/test_security_persistence_and_statistics.py`。规则变化需要构造式回归测试，不能
-只比较一个最终指标是否波动。
-
-## 6. 指标定义
-
-当前多模型实验统一计算：
-
-- `Recall@10`：前 10 中命中的测试正例数 / 该用户测试正例数；
-- `NDCG@10`：按排名折损的命中增益 / 理想增益；
-- `MRR@10`：首个测试正例排名的倒数，无命中为 0；
-- `Catalogue coverage@10`：所有评估用户 Top-10 覆盖的不同岗位数 / 岗位总数。
-
-这些指标只衡量当前半合成 holdout 协议。SQLite 的 `effectiveness` 是已记录满意反馈
-占全部反馈的比例；API 只接收与唯一 `impression_id` 的用户、岗位、模型版本完全匹配
-的反馈，并拒绝同一曝光重复反馈。它仍不是旧赛题要求的真实用户调查，因为缺少样本
-人群、实验分组、曝光有效期、无响应处理和调查流程。
-
-### 6.1 合成用户评估协议
-
-历史赛题 PDF 的原文目标是“推荐有效性达到 **80%** 以上（用户调查）”，不是常用
-离线指标，也不是 85%。当前仓库把三个概念拆开，防止用代理数值替代真人调查：
-
-1. `ProxyEffectiveness@K`：固定规则判定的有效岗位数 / 被评估的 Top-K 岗位数。
-   `effective = hard_constraints_pass ∧ skill_fit≥4 ∧
-   willingness_to_consider≥4`。若全部判断来自外部 LLM，才可在技术讨论中称
-   `LLMProxyEffectiveness@K`。
-2. `SimulatedCTR@K`：合成点击数 / 合成曝光数。点击概率由
-   `P(examine at rank) × P(attractive | latent relevance, persona)` 构造。
-3. `SimulatedFeedbackEffectiveness`：合成满意反馈 / 有合成反馈的曝光。它模拟
-   调查口径，但仍不是用户调查，不能与 80% 目标直接比较。
-
-判断层接收最小化合成 Persona 和岗位字段，不接收 rank、推荐分数、目标阈值或数据
-生成器的 `compatibility_score`。LLM 只返回 1～5 分的技能、职位兴趣、成长空间和考虑
-意愿及证据；Pydantic 拒绝非法输出，代码固定派生 `effective`。岗位文本按不可信输入
-处理，外部服务失败时记录错误类别并显式使用确定性基线。行为层独立处理位置观察偏差，
-所以同一潜在相关性在更后位置有更低的边际点击概率。
-
-默认离线命令：
-
-```bash
-uv run python -m scripts.run_user_simulation \
-  --judge deterministic --users 20 --top-k 10
-```
-
-**已验证（2026-07-31）**：固定数据种子 42、行为种子 20260731、发布模型
-`semi-synthetic-v1-seed42`，20 个 Persona、200 个推荐曝光；确定性判断基线的
-`ProxyEffectiveness@10=0.120`，合成 `CTR@10=0.265`、收藏率 0.080、投递率
-0.025；26 条合成反馈中的满意比例为 0.4615。完整协议元数据和聚合值见
-[`../results/synthetic_user_simulation.json`](../results/synthetic_user_simulation.json)。
-这些数值由人工设定的行为参数与半合成 Persona 共同决定，只用于验证实现和暴露假设，
-不用于证明推荐效果。
-
-外部 LLM 路径通过 `--judge llm` 启用，使用 `JOBREC_LLM_ENDPOINT`、
-`JOBREC_LLM_API_KEY` 和 `JOBREC_LLM_MODEL`；当前状态为**已实现、环境受限**，没有
-保存一次真实外部模型运行，因此上面的 0.120 不能写成 LLM 评价结果。若未来执行，应
-记录模型版本、提示词版本、采样参数和 fallback 比例，并先用盲测人工小样本校准一致性。
-
-设计依据来自外部研究，不是本项目效果证据：
-
-- [RecSim](https://research.google/pubs/recsim-a-configurable-simulation-platform-for-recommender-systems/)
-  启发了偏好/状态与选择响应的可配置分层；
-- [Position Bias Estimation for Unbiased Learning to Rank](https://research.google/pubs/position-bias-estimation-for-unbiased-learning-to-rank-in-personal-search/)
-  支持把展示位置的观察概率与相关性分开；
-- [NAACL 2024 的 LLM 用户模拟评估](https://aclanthology.org/2024.naacl-long.83/)
-  提醒模型与 prompt 会改变代理行为，必须做协议敏感性检查；
-- [AAAI 2025 的 LLM 用户模拟器](https://ojs.aaai.org/index.php/AAAI/article/view/33456)
-  提供了 LLM 推理与统计参与度模型组合的外部案例；
-- [EACL 2026 的 realism gap 研究](https://aclanthology.org/2026.eacl-long.244/)
-  进一步说明 prompt-only 模拟与真实用户仍存在系统差距。
-
-## 7. 多种子基线与消融
-
-**已验证：2026-07-19 重跑，结果与 2026-07-15 保留产物逐字节一致。** 命令：
-
-```bash
-uv run python -m scripts.run_experiments
-```
-
-协议：每个种子生成 40 用户、100 岗位；种子为 11、19、23、31、42；逐用户留出；
-所有模型共享候选池和 seen masking；LightGCN 训练 15 epoch；默认文本模型为离线
-feature hashing（产物沿用 `B3_sbert` 历史键名，但本次没有加载预训练 SBERT）。
-
-| 模型 | Recall@10 均值±总体标准差 | NDCG@10 均值±总体标准差 | MRR@10 均值 | Catalogue coverage@10 |
-|---|---:|---:|---:|---:|
-| B0 Random | 0.1271 ± 0.0182 | 0.0985 ± 0.0160 | 0.1664 | 0.984 |
-| B1 Popularity | 0.1048 ± 0.0213 | 0.0707 ± 0.0197 | 0.1070 | 0.210 |
-| B2 Skill | **0.2145 ± 0.0335** | **0.1714 ± 0.0254** | **0.2734** | 0.922 |
-| B3 Offline text | 0.1805 ± 0.0287 | 0.1329 ± 0.0155 | 0.2061 | 0.828 |
-| B4 LightGCN | 0.1215 ± 0.0088 | 0.0866 ± 0.0080 | 0.1395 | 0.972 |
-| E1 LightGCN + text | 0.1488 ± 0.0198 | 0.1191 ± 0.0122 | 0.2074 | 0.930 |
-| E2 + uniform skill | 0.2018 ± 0.0295 | 0.1620 ± 0.0169 | 0.2700 | 0.936 |
-| E3 + GAT skill | 0.2057 ± 0.0293 | 0.1643 ± 0.0161 | 0.2701 | 0.926 |
-
-完整逐种子值在 [`../results/experiment_summary.json`](../results/experiment_summary.json)。
-重跑前后 SHA-256 均为
-`1c0dd1d2f2aa3e493b51945b37982140d70460bc4ed3091c5746c304c8c8f704`。
-
-### 7.1 可以得出的结论
-
-- 技能基线 B2 的均值最好，说明生成器的主要信号确实是技能兼容度。
-- E3 相比 E2 只有很小的均值差异，当前协议不足以证明 GAT 权重有稳定收益。
-- LightGCN 单路在该小型稀疏分布上弱于技能和文本基线；保留该负面结果比选择性报告
-  复杂模型更可信。
-- 融合链路的价值在当前阶段主要是接口、发布和解释能力，不是“效果领先”的证明。
-
-### 7.2 不能得出的结论
-
-- 表中没有真实标签，不能外推到真实投递、面试或用户满意度。
-- 五个种子不是独立真实数据集，也没有统计显著性或外部基准复现。
-- GAT 使用代理监督，不能把学到的权重解释为真实岗位市场的重要度。
-- `B3_sbert` 的产物键名不代表本次运行了预训练 Sentence-BERT。
-
-## 8. 工程验证
-
-### 8.1 本地质量门禁
-
-**已验证日期：2026-07-31；环境：macOS、Python 3.13、锁定 uv 环境。**
+默认门禁：
 
 ```bash
 uv run python -m compileall -q src scripts tests main.py
-uv run python -m pytest -q --cov=src --cov-report=term-missing --cov-fail-under=50
+uv run python -m pytest -q
 uv run black --check src scripts tests main.py
 uv run isort --check-only src scripts tests main.py
-uv run mypy src/api/routes.py src/models/bundle.py src/data/graph_store.py \
-  src/generation/adapters.py src/security.py src/data/models.py \
-  src/metrics/event_store.py src/data/private_profile_store.py \
-  src/utils/crypto.py
+uv run mypy src/api/routes.py src/models/bundle.py src/metrics/event_store.py \
+  src/ranking src/recall src/generation/profile_expansion.py src/data/loader.py
 ```
 
-当前复核结果：28 个测试通过，`src` 总行覆盖率 61.89%，compile、Black、Isort 与
-上述关键服务边界的 mypy 均通过。精确覆盖率快照见
-[`../results/coverage.json`](../results/coverage.json)。测试运行出现依赖侧弃用警告，
-不影响本次通过结论，但不应误报为“零警告”。
+测试保护时间切分、负采样、seen masking、候选来源、排序可加解释、生成证据约束、技能
+路径、Bundle 身份、已知/冷启动 API 和唯一曝光反馈。
 
-### 8.2 API 负载冒烟
+## 8. 推导/预期
 
-**已验证产物日期：2026-07-15。** 环境为本地 macOS、单 uvicorn worker、离线
-feature-hashing 编码器。协议为 100 个请求、并发 10：
+当前精确召回对目录规模 `N` 的协同点积约 `O(Nd)`，文本稀疏相似度取决于非零项，路内
+Top-K 可用 `O(N log K)`，候选排序约 `O(CF)`，重排最坏约 `O(KC)`。在 50 个岗位上
+预期为毫秒到几十毫秒量级，但尚未在固定硬件采集分位数，不能写成 P95。
 
-| 指标 | 结果 |
-|---|---:|
-| 错误率 | 0% |
-| 吞吐 | 328.40 req/s |
-| 平均延迟 | 26.05 ms |
-| P50 | 7.90 ms |
-| P95 | 103.91 ms |
-| P99 | 223.80 ms |
-
-原始摘要见 [`../results/load_test_summary.json`](../results/load_test_summary.json)。这是
-功能/小负载冒烟，不是耐久、多 worker、1000 并发、故障恢复或生产 SLO 证明。
-
-### 8.3 环境受限项
-
-- Dockerfile 与 Compose 清单已静态提供，保留记录没有证明镜像实际构建和运行。
-- Neo4j 适配器、Cypher 和导入脚本已实现；没有外部 Neo4j 的集成与故障证据。
-- 可选预训练 Sentence-BERT 和外部 LLM 不在默认离线质量门禁中。
-- Persona-LLM 判断路径已实现，但当前只有 fake-adapter 契约测试和确定性基线产物；
-  未做真人校准、多模型一致性或外部模型稳定性评估。
-- 公平性模块只能展示指标计算，缺少合法真实群体属性与治理流程。
-- Data Privacy 已满足赛题四字段加密和授权解密演示要求；生产身份、KMS、审计、
-  同意、保留、备份与安全擦除仍未验证。
-
-## 9. 若未来获得合法新数据
-
-不得尝试“复原”已丢失数据或从公开个人页面无授权抓取。只有在获得新的合法、授权、
-可治理数据后，才应另行定义：
-
-- 数据所有者、使用目的、授权、保留与删除；
-- 跨系统唯一事件/曝光 ID、事件时间、模型版本、位置和实验分组；
-- 岗位时效、去重、技能本体版本和简历解析证据；
-- 按时间切分、反馈延迟、冷启动与候选池构造；
-- 漂移、缺失、选择偏差、受保护属性使用和独立审计；
-- 模型注册、回滚、线上实验和容量/故障测试。
-
-在这些条件满足前，项目的诚实结论是“面试级、协议可复现原型”，不是“真实业务
-推荐系统”。
+当目录达到十万级且精确文本/向量计算成为瓶颈时，再比较 ANN 相对精确 Top-K 的 Recall、
+P50/P95/P99、索引构建时长和内存。

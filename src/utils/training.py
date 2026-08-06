@@ -1,510 +1,142 @@
-"""
-Training utilities for LightGCN model.
-"""
+"""LightGCN 的可复现 BPR 训练与留出评估。"""
 
-import time
-from typing import Any, Dict, List, Optional, Tuple
+from __future__ import annotations
+
+import math
+import random
+from typing import Any, Iterable
 
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from tqdm import tqdm
 
-from src.config.settings import get_settings
-from src.data.loader import DataLoader as GraphDataLoader
+from src.data.loader import DataLoader
 from src.recall.lightgcn import LightGCN, prepare_adj_matrix
+
+
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
 
 def sample_unobserved_negatives(
     train_r: torch.Tensor, user_ids: torch.Tensor
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Sample one unobserved item per user.
-
-    Returns the negative item IDs and the positions retained from ``user_ids``.
-    Fully saturated users are excluded because no valid BPR negative exists.
-    """
-    negative_items = []
-    valid_positions = []
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """为每个用户采一个训练期未观察岗位，并返回仍有合法负样本的位置。"""
+    negatives: list[torch.Tensor] = []
+    positions: list[int] = []
     for position, user_id in enumerate(user_ids.tolist()):
         candidates = torch.nonzero(train_r[user_id] == 0).flatten()
-        if candidates.numel() > 0:
-            negative_items.append(candidates[torch.randint(candidates.numel(), (1,))])
-            valid_positions.append(position)
-    if not negative_items:
+        if candidates.numel():
+            negatives.append(candidates[torch.randint(candidates.numel(), (1,))])
+            positions.append(position)
+    if not negatives:
         empty = torch.empty(0, dtype=torch.long, device=train_r.device)
         return empty, empty
     return (
-        torch.cat(negative_items).to(train_r.device),
-        torch.tensor(valid_positions, dtype=torch.long, device=train_r.device),
+        torch.cat(negatives).to(train_r.device),
+        torch.tensor(positions, dtype=torch.long, device=train_r.device),
     )
 
 
-def create_data_loaders(data: Any, test_ratio: float = 0.2) -> Tuple[Any, Any]:
-    """
-    Create data loaders for training and testing.
-
-    Args:
-        data: GraphEntities or similar data
-        test_ratio: Ratio of test data
-
-    Returns:
-        Tuple of (train_loader, test_loader)
-    """
-    # This is a simplified version - in practice would use PyTorch DataLoader
-    # For now, return the DataLoader instances
-    if hasattr(data, "__class__") and data.__class__.__name__ == "GraphEntities":
-        # Create DataLoader from GraphEntities
-        data_loader = GraphDataLoader(data)
-        return (
-            data_loader,
-            data_loader,
-        )  # Same loader for both in this simplified version
-    else:
-        # Assume it's already a DataLoader
-        return data, data
+def evaluate_embeddings(
+    user_embeddings: torch.Tensor,
+    item_embeddings: torch.Tensor,
+    test_r: torch.Tensor,
+    train_r: torch.Tensor,
+    k: int = 10,
+) -> dict[str, float]:
+    """在同一全岗位候选池上评估，并屏蔽训练期已见岗位。"""
+    test_users = torch.nonzero(test_r.sum(dim=1) > 0).flatten()
+    if not test_users.numel():
+        return {"recall@10": 0.0, "ndcg@10": 0.0, "mrr@10": 0.0}
+    scores = user_embeddings[test_users] @ item_embeddings.T
+    scores = scores.masked_fill(train_r[test_users] > 0, -torch.inf)
+    effective_k = min(k, item_embeddings.shape[0])
+    ranked = torch.topk(scores, k=effective_k, dim=1).indices
+    recalls: list[float] = []
+    ndcgs: list[float] = []
+    mrrs: list[float] = []
+    for row, user_id in enumerate(test_users):
+        relevant = set(torch.nonzero(test_r[user_id] > 0).flatten().tolist())
+        hits = [int(int(item) in relevant) for item in ranked[row]]
+        recalls.append(sum(hits) / max(len(relevant), 1))
+        dcg = sum(hit / math.log2(position + 2) for position, hit in enumerate(hits))
+        idcg = sum(
+            1 / math.log2(position + 2)
+            for position in range(min(len(relevant), effective_k))
+        )
+        ndcgs.append(dcg / idcg if idcg else 0.0)
+        first = next((position + 1 for position, hit in enumerate(hits) if hit), None)
+        mrrs.append(1.0 / first if first else 0.0)
+    return {
+        "recall@10": float(np.mean(recalls)),
+        "ndcg@10": float(np.mean(ndcgs)),
+        "mrr@10": float(np.mean(mrrs)),
+    }
 
 
 def train_lightgcn(
-    model: LightGCN,
-    data_loader: Any,
-    n_epochs: int = 100,
+    loader: DataLoader,
+    *,
+    embedding_dim: int = 32,
+    n_layers: int = 2,
+    epochs: int = 15,
     learning_rate: float = 0.001,
     weight_decay: float = 1e-4,
-    device: str = "cpu",
-    verbose: bool = True,
-) -> Dict[str, Any]:
-    """
-    Train LightGCN model.
-
-    Args:
-        model: LightGCN model
-        data_loader: DataLoader with training data
-        n_epochs: Number of training epochs
-        learning_rate: Learning rate
-        weight_decay: Weight decay for regularization
-        device: Device to train on
-        verbose: Whether to print progress
-
-    Returns:
-        Dictionary with training history and metrics
-    """
-    settings = get_settings()
-    torch.manual_seed(settings.system.random_seed)
-    np.random.seed(settings.system.random_seed)
-    model.to(device)
-    model.train()
-
-    # Optimizer
-    optimizer = optim.Adam(
-        model.parameters(), lr=learning_rate, weight_decay=weight_decay
-    )
-
-    # Prepare adjacency matrix
-    adj_matrix = data_loader.get_sparse_graph()
-    adj_tensor = prepare_adj_matrix(adj_matrix, device)
-
-    # Get training data
-    train_R, test_R, test_users = data_loader.get_train_test_data()
-
-    # Convert to tensors
-    train_R_tensor = torch.tensor(train_R.toarray(), device=device)
-    test_R_tensor = torch.tensor(test_R.toarray(), device=device)
-
-    # Training history
-    history = {"loss": [], "epoch_time": [], "train_metrics": [], "test_metrics": []}
-
-    # Early stopping
-    best_loss = float("inf")
-    patience = 10
-    patience_counter = 0
-
-    # Training loop
-    for epoch in range(n_epochs):
-        epoch_start = time.time()
-
-        # Forward pass to get embeddings
-        user_embeddings, item_embeddings = model(adj_tensor)
-
-        # Sample training pairs
-        n_users, n_items = train_R_tensor.shape
-        batch_size = min(1024, n_users * n_items // 10)
-
-        # Simple sampling: get positive interactions
-        pos_pairs = torch.nonzero(train_R_tensor > 0)
-        if len(pos_pairs) == 0:
-            continue
-
-        # Sample batch
-        batch_indices = torch.randint(0, len(pos_pairs), (batch_size,))
-        batch_pairs = pos_pairs[batch_indices]
-
-        user_ids = batch_pairs[:, 0]
-        pos_item_ids = batch_pairs[:, 1]
-
-        # Negatives must not be observed training interactions. Sampling from
-        # all items can mark a positive edge as negative and corrupt BPR.
-        neg_item_ids, valid_positions_tensor = sample_unobserved_negatives(
-            train_R_tensor, user_ids
-        )
-        if neg_item_ids.numel() == 0:
-            continue
-        user_ids = user_ids[valid_positions_tensor]
-        pos_item_ids = pos_item_ids[valid_positions_tensor]
-
-        # Compute loss
-        loss = model.bpr_loss(
-            user_embeddings, item_embeddings, user_ids, pos_item_ids, neg_item_ids
-        )
-
-        # Add regularization
-        reg_loss = weight_decay * (
-            model.user_embedding.weight.norm(2).pow(2)
-            + model.item_embedding.weight.norm(2).pow(2)
-        )
-        total_loss = loss + reg_loss
-
-        # Backward pass
-        optimizer.zero_grad()
-        total_loss.backward()
-        optimizer.step()
-
-        # Record history
-        epoch_time = time.time() - epoch_start
-        history["loss"].append(total_loss.item())
-        history["epoch_time"].append(epoch_time)
-
-        # Evaluate periodically
-        if (epoch + 1) % 10 == 0 or epoch == n_epochs - 1:
-            train_metrics = evaluate_model(
-                model, train_R_tensor, adj_tensor, device, k_values=[20]
-            )
-            test_metrics = evaluate_model(
-                model,
-                test_R_tensor,
-                adj_tensor,
-                device,
-                k_values=[20],
-                train_R=train_R_tensor,
-            )
-
-            history["train_metrics"].append({"epoch": epoch, **train_metrics})
-            history["test_metrics"].append({"epoch": epoch, **test_metrics})
-
-            if verbose:
-                print(
-                    f"Epoch {epoch+1}/{n_epochs}, "
-                    f"Loss: {total_loss.item():.4f}, "
-                    f"Recall@20: {test_metrics.get('recall@20', 0):.4f}, "
-                    f"NDCG@20: {test_metrics.get('ndcg@20', 0):.4f}"
-                )
-
-            # Early stopping check
-            current_loss = total_loss.item()
-            if current_loss < best_loss:
-                best_loss = current_loss
-                patience_counter = 0
-            else:
-                patience_counter += 1
-                if patience_counter >= patience:
-                    if verbose:
-                        print(f"Early stopping at epoch {epoch+1}")
-                    break
-        elif verbose and (epoch + 1) % 5 == 0:
-            print(f"Epoch {epoch+1}/{n_epochs}, Loss: {total_loss.item():.4f}")
-
-    # Final evaluation
-    model.eval()
-    with torch.no_grad():
-        final_train_metrics = evaluate_model(model, train_R_tensor, adj_tensor, device)
-        final_test_metrics = evaluate_model(
-            model, test_R_tensor, adj_tensor, device, train_R=train_R_tensor
-        )
-
-    results = {
-        "model": model,
-        "history": history,
-        "final_train_metrics": final_train_metrics,
-        "final_test_metrics": final_test_metrics,
-        "n_epochs_trained": len(history["loss"]),
-        "best_loss": min(history["loss"]) if history["loss"] else float("inf"),
-    }
-
-    return results
-
-
-def evaluate_model(
-    model: LightGCN,
-    R: torch.Tensor,
-    adj_matrix: torch.Tensor,
-    device: str = "cpu",
-    k_values: List[int] = [5, 10, 20],
-    train_R: Optional[torch.Tensor] = None,
-) -> Dict[str, float]:
-    """
-    Evaluate model performance.
-
-    Args:
-        model: LightGCN model
-        R: Interaction matrix (binary or weighted)
-        adj_matrix: Adjacency matrix
-        device: Device to evaluate on
-        k_values: List of k values for metrics
-
-    Returns:
-        Dictionary of evaluation metrics
-    """
-    model.eval()
-    with torch.no_grad():
-        # Get embeddings
-        user_embeddings, item_embeddings = model(adj_matrix)
-
-        # Get test users (those with interactions in R)
-        test_users = torch.nonzero(R.sum(dim=1) > 0).squeeze()
-        if test_users.dim() == 0:
-            test_users = test_users.unsqueeze(0)
-
-        if len(test_users) == 0:
-            return {f"recall@{k}": 0.0 for k in k_values}
-
-        # Compute scores for all items for test users
-        user_vectors = user_embeddings[test_users]  # (n_test_users, embedding_dim)
-        scores = torch.matmul(
-            user_vectors, item_embeddings.T
-        )  # (n_test_users, n_items)
-
-        # Test ranking must exclude edges already available during training;
-        # otherwise metrics are inflated by recommending seen jobs.
-        if train_R is not None:
-            scores = scores.masked_fill(train_R[test_users] > 0, -torch.inf)
-
-        # Get ground truth
-        ground_truth = R[test_users] > 0  # Binary matrix
-
-        # Compute metrics
-        metrics = {}
-        topk_by_k = {}
-        for k in k_values:
-            effective_k = min(k, model.n_items)
-            if effective_k == 0:
-                continue
-            # Get top-k items for each user
-            _, topk_indices = torch.topk(scores, k=effective_k, dim=1)
-            topk_by_k[k] = topk_indices
-
-            # Compute recall@k
-            recall_sum = 0.0
-            ndcg_sum = 0.0
-
-            for i in range(len(test_users)):
-                user_topk = topk_indices[i]
-                user_gt = torch.nonzero(ground_truth[i]).squeeze()
-
-                if user_gt.dim() == 0:
-                    user_gt = user_gt.unsqueeze(0)
-
-                # Recall@k: standard definition hits / |Test(u)|
-                hits = torch.isin(user_topk, user_gt).sum().item()
-                recall = hits / len(user_gt) if len(user_gt) > 0 else 0.0
-                recall_sum += recall
-
-                # NDCG@k
-                dcg = 0.0
-                for j, item in enumerate(user_topk):
-                    if torch.isin(item, user_gt):
-                        dcg += 1.0 / torch.log2(torch.tensor(j + 2.0, device=device))
-
-                # Ideal DCG
-                ideal_hits = min(effective_k, len(user_gt))
-                idcg = sum(
-                    1.0 / torch.log2(torch.tensor(j + 2.0, device=device))
-                    for j in range(ideal_hits)
-                )
-
-                ndcg = dcg / idcg if idcg > 0 else 0.0
-                ndcg_sum += ndcg.item()
-
-            metrics[f"recall@{k}"] = recall_sum / len(test_users)
-            metrics[f"ndcg@{k}"] = ndcg_sum / len(test_users)
-
-        # Compute precision@k and mrr
-        for k in k_values:
-            if k not in topk_by_k:
-                continue
-            topk_indices = topk_by_k[k]
-            # Precision@k: directly computed as hits / k
-            precision_sum = 0.0
-            for i in range(len(test_users)):
-                user_topk = topk_indices[i]
-                user_gt = torch.nonzero(ground_truth[i]).squeeze()
-                if user_gt.dim() == 0:
-                    user_gt = user_gt.unsqueeze(0)
-                hits = torch.isin(user_topk, user_gt.to(user_topk.device)).sum().item()
-                precision_sum += hits / topk_indices.shape[1]
-            metrics[f"precision@{k}"] = precision_sum / len(test_users)
-
-            # MRR@k: mean reciprocal rank
-            mrr_sum = 0.0
-            for i in range(len(test_users)):
-                user_topk = topk_indices[i]
-                user_gt = torch.nonzero(ground_truth[i]).squeeze()
-                if user_gt.dim() == 0:
-                    user_gt = user_gt.unsqueeze(0)
-                if len(user_gt) == 0 or user_gt.numel() == 0:
-                    continue
-                # Find first hit
-                hits_mask = torch.isin(user_topk, user_gt.to(user_topk.device))
-                hit_positions = torch.nonzero(hits_mask)
-                if hit_positions.numel() > 0:
-                    first_hit = hit_positions[0].item() + 1  # 1-indexed
-                    mrr_sum += 1.0 / first_hit
-            metrics[f"mrr@{k}"] = mrr_sum / len(test_users)
-
-        # HitRate@k: fraction of users with at least one hit in top-k
-        for k in k_values:
-            if k not in topk_by_k:
-                continue
-            topk_indices = topk_by_k[k]
-            hit_count = 0
-            for i in range(len(test_users)):
-                user_topk = topk_indices[i]
-                user_gt = torch.nonzero(ground_truth[i]).squeeze()
-                if user_gt.dim() == 0:
-                    user_gt = user_gt.unsqueeze(0)
-                if len(user_gt) > 0 and user_gt.numel() > 0:
-                    if torch.isin(user_topk, user_gt.to(user_topk.device)).any():
-                        hit_count += 1
-            metrics[f"hitrate@{k}"] = hit_count / len(test_users)
-
-        # Catalog Coverage@k: fraction of unique items recommended across all users
-        for k in k_values:
-            if k not in topk_by_k:
-                continue
-            topk_indices = topk_by_k[k]
-            all_recommended = set()
-            for i in range(len(test_users)):
-                items = topk_indices[i].tolist()
-                all_recommended.update(items[:k])
-            metrics[f"coverage@{k}"] = len(all_recommended) / model.n_items
-
-        # Compute AUC (simplified)
-        try:
-            # Sample some negative items for AUC calculation
-            n_samples = min(1000, scores.numel())
-            flat_scores = scores.flatten()
-            flat_labels = ground_truth.flatten().float()
-
-            # Random sample for efficiency
-            indices = torch.randint(0, len(flat_scores), (n_samples,))
-            sample_scores = flat_scores[indices]
-            sample_labels = flat_labels[indices]
-
-            # Sort by score
-            sorted_indices = torch.argsort(sample_scores, descending=True)
-            sorted_labels = sample_labels[sorted_indices]
-
-            # Compute AUC using trapezoidal rule
-            cum_sum = torch.cumsum(sorted_labels, dim=0)
-            auc = torch.sum(cum_sum * (1.0 - sorted_labels)) / (
-                torch.sum(sorted_labels) * torch.sum(1.0 - sorted_labels)
-            )
-            metrics["auc"] = auc.item() if not torch.isnan(auc) else 0.0
-        except:
-            metrics["auc"] = 0.0
-
-    return metrics
-
-
-def train_full_pipeline(
-    data: Any, config: Optional[Dict[str, Any]] = None
-) -> Dict[str, Any]:
-    """
-    Train full pipeline: LightGCN + optionally other components.
-
-    Args:
-        data: Training data
-        config: Configuration dictionary
-
-    Returns:
-        Dictionary with trained models and metrics
-    """
-    settings = get_settings()
-
-    # Seed before model construction. Seeding only inside train_lightgcn() is
-    # too late because embedding initialization has already consumed RNG state.
-    torch.manual_seed(settings.system.random_seed)
-    np.random.seed(settings.system.random_seed)
-
-    # Use config or settings
-    if config is None:
-        config = {
-            "lightgcn_embedding_dim": settings.model.lightgcn_embedding_dim,
-            "lightgcn_n_layers": settings.model.lightgcn_n_layers,
-            "lightgcn_dropout": settings.model.lightgcn_dropout,
-            "learning_rate": settings.model.lightgcn_learning_rate,
-            "weight_decay": settings.model.lightgcn_weight_decay,
-            "n_epochs": 50,
-            "device": settings.system.device.value,
-        }
-
-    # Create data loader
-    if hasattr(data, "__class__") and data.__class__.__name__ == "GraphEntities":
-        data_loader = GraphDataLoader(data)
-    else:
-        data_loader = data
-
-    # Get data dimensions (DataLoader uses n_users and n_jobs)
-    n_users = data_loader.n_users
-    n_items = data_loader.n_jobs
-
-    # Create model
+    seed: int = 42,
+) -> dict[str, Any]:
+    set_seed(seed)
     model = LightGCN(
-        n_users=n_users,
-        n_items=n_items,
-        embedding_dim=config["lightgcn_embedding_dim"],
-        n_layers=config["lightgcn_n_layers"],
-        dropout=config["lightgcn_dropout"],
-        device=config["device"],
+        loader.n_users,
+        loader.n_jobs,
+        embedding_dim=embedding_dim,
+        n_layers=n_layers,
     )
-
-    # Train model
-    results = train_lightgcn(
-        model=model,
-        data_loader=data_loader,
-        n_epochs=config["n_epochs"],
-        learning_rate=config["learning_rate"],
-        weight_decay=config["weight_decay"],
-        device=config["device"],
-        verbose=True,
-    )
-
-    # Add configuration to results
-    results["config"] = config
-    results["data_stats"] = {
-        "n_users": n_users,
-        "n_items": n_items,
-        "n_interactions": data_loader.R.nnz,
+    adjacency = prepare_adj_matrix(loader.get_sparse_graph())
+    train_r = torch.tensor(loader.train_R.toarray())
+    test_r = torch.tensor(loader.test_R.toarray())
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    positive_pairs = torch.nonzero(train_r > 0)
+    losses: list[float] = []
+    for _ in range(epochs):
+        model.train()
+        user_embeddings, item_embeddings = model(adjacency)
+        user_ids = positive_pairs[:, 0]
+        positive_ids = positive_pairs[:, 1]
+        negative_ids, positions = sample_unobserved_negatives(train_r, user_ids)
+        if not negative_ids.numel():
+            break
+        loss = model.bpr_loss(
+            user_embeddings,
+            item_embeddings,
+            user_ids[positions],
+            positive_ids[positions],
+            negative_ids,
+        )
+        regularization = weight_decay * (
+            model.user_embedding.weight.square().sum()
+            + model.item_embedding.weight.square().sum()
+        )
+        total = loss + regularization
+        optimizer.zero_grad()
+        total.backward()
+        optimizer.step()
+        losses.append(float(total.detach()))
+    model.eval()
+    with torch.no_grad():
+        users, items = model(adjacency)
+    return {
+        "model": model,
+        "user_embeddings": users,
+        "item_embeddings": items,
+        "losses": losses,
+        "metrics": evaluate_embeddings(users, items, test_r, train_r),
     }
 
-    return results
 
-
-def save_training_results(results: Dict[str, Any], path: str) -> None:
-    """Save training results to file."""
-    import pickle
-
-    # Don't save the model in the results (save separately)
-    saved_results = results.copy()
-    if "model" in saved_results:
-        del saved_results["model"]
-
-    with open(path, "wb") as f:
-        pickle.dump(saved_results, f)
-
-
-def load_training_results(path: str) -> Dict[str, Any]:
-    """Load training results from file."""
-    import pickle
-
-    with open(path, "rb") as f:
-        return pickle.load(f)
+def rank_scores(scores: Iterable[float], seen: set[int]) -> list[int]:
+    safe = np.asarray(list(scores), dtype=float)
+    if seen:
+        safe[list(seen)] = -np.inf
+    return np.argsort(safe, kind="stable")[::-1].tolist()

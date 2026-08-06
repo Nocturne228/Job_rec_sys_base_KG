@@ -1,270 +1,205 @@
-"""Production-shaped FastAPI surface backed by an offline model bundle."""
+"""面试演示所需的最小 FastAPI 服务。"""
 
 from __future__ import annotations
 
-import hmac
-import json
 import os
 import re
-import time
 from contextlib import asynccontextmanager
-from pathlib import Path
-from typing import Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any
 from uuid import uuid4
 
 import torch
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field, model_validator
 
-from src.data import (
-    DataLoader,
-    EncryptedProfileStore,
-    GraphLoader,
-    PrivateProfile,
-    generate_mock_data,
-)
+from src.data import DataLoader, GraphEntities, GraphLoader, generate_mock_data
 from src.generation import (
-    LLMSimulator,
-    OpenAICompatibleLLM,
-    fallback_advice,
-    validate_advice,
+    DeterministicProfileExpander,
+    ExpansionResult,
+    OpenAICompatibleProfileExpander,
+    ResilientProfileExpander,
 )
 from src.metrics import EventStore
-from src.models import ModelBundle, StaticSkillWeighter
-from src.ranking import LinearFusionRanker, RankingFeatures, SkillCoverageCalculator
-from src.recall import LightGCN, SBERTRecall
+from src.models import ModelBundle, data_fingerprint
+from src.ranking import (
+    DiversityReranker,
+    FeatureBuilder,
+    PointwiseRanker,
+    SkillCoverageCalculator,
+)
+from src.recall import LightGCN, TextRecall, merge_recall_routes
 from src.recall.lightgcn import prepare_adj_matrix
-from src.security import issue_token, require_roles
 
 
-class TokenRequest(BaseModel):
-    username: str = Field(min_length=1, max_length=100)
-    password: str = Field(min_length=1, max_length=200)
-
-
-class ResumeUpload(BaseModel):
+class RecommendationRequest(BaseModel):
+    user_id: str | None = None
     resume_text: str = Field(default="", max_length=20_000)
-    user_id: Optional[str] = None
-    job_id: Optional[str] = None
-    expected_job_title: Optional[str] = None
+    title_query: str | None = Field(default=None, max_length=100)
+    top_k: int = Field(default=10, ge=1, le=20)
+    use_interest_expansion: bool = True
 
     @model_validator(mode="after")
-    def require_identity_or_resume(self) -> "ResumeUpload":
+    def require_identity_or_resume(self) -> "RecommendationRequest":
         if not self.user_id and not self.resume_text.strip():
-            raise ValueError("Provide user_id or resume_text")
+            raise ValueError("provide user_id or resume_text")
         return self
 
 
-class RecommendResponse(BaseModel):
+class Recommendation(BaseModel):
     request_id: str
     impression_id: int
+    subject_id: str
     job_id: str
     title: str
     score: float
-    contributions: Dict[str, float]
+    contributions: dict[str, float]
+    recall_sources: list[str]
     retrieval_mode: str
+    generation_mode: str
+    expanded_interests: list[str]
     model_version: str
+
+
+class CompetencyRequest(BaseModel):
+    job_id: str
+    user_id: str | None = None
+    resume_text: str = Field(default="", max_length=20_000)
+
+    @model_validator(mode="after")
+    def require_identity_or_resume(self) -> "CompetencyRequest":
+        if not self.user_id and not self.resume_text.strip():
+            raise ValueError("provide user_id or resume_text")
+        return self
 
 
 class CompetencyReport(BaseModel):
     job_id: str
     overall_match: float
-    skill_coverage: str
-    gaps: List[dict]
-    learning_paths: List[dict]
-    graph_paths: List[dict]
-    advice_summary: str
+    gaps: list[dict[str, Any]]
+    learning_paths: list[dict[str, Any]]
     evidence_source: str
-
-
-class CandidateMatch(BaseModel):
-    user_id: str
-    score: float
-    matched_skills: List[str]
-    missing_skills: List[str]
 
 
 class FeedbackRequest(BaseModel):
     impression_id: int = Field(gt=0)
-    user_id: str
+    subject_id: str
     job_id: str
-    satisfied: bool
+    clicked: bool = False
+    dwell_seconds: float = Field(default=0.0, ge=0.0, le=86_400.0)
+    saved: bool = False
+    applied: bool = False
+    satisfied: bool | None = None
+
+    @model_validator(mode="after")
+    def require_observable_outcome(self) -> "FeedbackRequest":
+        if not any(
+            (
+                self.clicked,
+                self.dwell_seconds > 0,
+                self.saved,
+                self.applied,
+                self.satisfied is not None,
+            )
+        ):
+            raise ValueError("provide at least one observable feedback outcome")
+        return self
 
 
 class FeedbackResponse(BaseModel):
     status: str
-    impression_id: int
-    n_total: int
-    n_satisfied: int
-    effectiveness: float
-    pass_threshold: bool
-    by_user: Dict[str, float]
+    feedback_count: int
+    satisfied_count: int
+    satisfaction_rate: float
 
 
-class PrivateProfileRequest(PrivateProfile):
-    user_id: str = Field(min_length=1, max_length=100)
+@dataclass
+class Pipeline:
+    bundle: ModelBundle
+    data: GraphEntities
+    loader: DataLoader
+    user_embeddings: torch.Tensor
+    item_embeddings: torch.Tensor
+    text: TextRecall
+    skills: SkillCoverageCalculator
+    features: FeatureBuilder
+    ranker: PointwiseRanker
+    reranker: DiversityReranker
+    expander: ResilientProfileExpander
+    graph: GraphLoader
+    events: EventStore
 
 
-class PrivateProfileResponse(PrivateProfile):
-    user_id: str
-
-
-class PrivateProfileMutationResponse(BaseModel):
-    status: str
-    user_id: str
-
-
-class TrendReport(BaseModel):
-    hot_jobs: List[dict]
-    hot_skills: List[dict]
-
-
-class EffectivenessResponse(BaseModel):
-    n_total: int
-    n_satisfied: int
-    effectiveness: float
-    pass_threshold: bool
-    threshold: float
-    by_user: Dict[str, float]
-
-
-def _coverage_value(result: dict) -> float:
-    weighted = result.get("gat_coverage_score")
-    return float(weighted if weighted is not None else result["coverage_score"])
-
-
-def _load_pipeline() -> dict:
-    from src.analytics import TrendAnalyzer
-    from src.data.graph_store import (
-        InMemorySkillGraph,
-        Neo4jSkillGraph,
-        SkillGraphStore,
-    )
-    from src.matching import ReverseMatcher
-
+def _load_pipeline() -> Pipeline:
     bundle_path = os.environ.get("JOBREC_BUNDLE_PATH", "models/jobrec_bundle.json")
     bundle = ModelBundle.load(bundle_path)
     data = generate_mock_data(20, 50, seed=bundle.data_seed)
+    if data_fingerprint(data) != bundle.data_sha256:
+        raise RuntimeError("bundle data fingerprint does not match generated data")
     loader = DataLoader(data, random_seed=bundle.data_seed)
     if (
         loader.user_id_to_idx != bundle.user_id_to_idx
         or loader.job_id_to_idx != bundle.job_id_to_idx
     ):
-        raise RuntimeError(
-            "Model-bundle ID mappings do not match the generated dataset"
-        )
-
-    lightgcn = LightGCN.load(bundle.lightgcn_checkpoint)
-    adjacency = prepare_adj_matrix(loader.get_sparse_graph())
-    lightgcn.eval()
+        raise RuntimeError("bundle ID mappings do not match generated data")
+    model = LightGCN.load(bundle.checkpoint_path)
+    if model.n_users != loader.n_users or model.n_items != loader.n_jobs:
+        raise RuntimeError("checkpoint dimensions do not match bundle mappings")
+    model.eval()
     with torch.no_grad():
-        user_embeddings, item_embeddings = lightgcn(adjacency)
-
-    use_pretrained = os.environ.get("JOBREC_USE_PRETRAINED_SBERT", "0") == "1"
-    sbert = SBERTRecall(
-        model_name="all-MiniLM-L6-v2",
-        use_faiss=True,
-        use_pretrained=use_pretrained,
-    )
-    for user in data.users:
-        sbert.add_user(user.id, user.resume_text or "")
+        users, items = model(prepare_adj_matrix(loader.get_sparse_graph()))
+    text = TextRecall(n_features=int(bundle.text_config["n_features"]))
     for job in data.jobs:
-        sbert.add_job(job.id, job.description)
-
-    weighter = StaticSkillWeighter(bundle.skill_weights)
-    skill_calc = SkillCoverageCalculator(gat_weighter=weighter)
-    ranker = LinearFusionRanker(
-        weights=bundle.ranking_weights, normalization_mode="query"
+        text.add_job(job.id, job.description)
+    features = FeatureBuilder(data, loader, text, users, items)
+    llm_endpoint = os.environ.get("JOBREC_LLM_ENDPOINT")
+    llm_model = os.environ.get("JOBREC_LLM_MODEL")
+    llm_key = os.environ.get("JOBREC_LLM_API_KEY")
+    primary = (
+        OpenAICompatibleProfileExpander(llm_endpoint, llm_model, llm_key)
+        if llm_endpoint and llm_model and llm_key
+        else None
     )
-    graph_loader = GraphLoader(data)
-    graph_store: SkillGraphStore
-    if os.environ.get("JOBREC_GRAPH_BACKEND") == "neo4j":
-        graph_store = Neo4jSkillGraph(
-            os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
-            os.environ.get("NEO4J_USER", "neo4j"),
-            os.environ.get("NEO4J_PASSWORD", ""),
-        )
-        graph_source = "neo4j"
-    else:
-        graph_store = InMemorySkillGraph(data)
-        graph_source = "typed_in_memory_graph"
-
-    llm = (
-        OpenAICompatibleLLM()
-        if os.environ.get("JOBREC_LLM_ENDPOINT")
-        else LLMSimulator(seed=42)
-    )
-    event_store = EventStore(
-        os.environ.get("JOBREC_EVENT_DB", "data/jobrec_events.sqlite3")
-    )
-    profile_store = EncryptedProfileStore(
-        os.environ.get("JOBREC_PROFILE_DB", "data/jobrec_profiles.sqlite3"),
-        os.environ.get(
-            "JOBREC_PROFILE_MASTER_KEY", "development-only-profile-master-key"
+    return Pipeline(
+        bundle=bundle,
+        data=data,
+        loader=loader,
+        user_embeddings=users,
+        item_embeddings=items,
+        text=text,
+        skills=SkillCoverageCalculator(),
+        features=features,
+        ranker=PointwiseRanker.from_config(bundle.ranking_model),
+        reranker=DiversityReranker(**bundle.reranking_config),
+        expander=ResilientProfileExpander(
+            DeterministicProfileExpander(data.skills), primary
+        ),
+        graph=GraphLoader(data),
+        events=EventStore(
+            os.environ.get("JOBREC_EVENT_DB", "data/jobrec_events.sqlite3")
         ),
     )
-    analyzer = TrendAnalyzer(
-        jobs=data.jobs, users=data.users, interactions=data.interactions
-    )
-    reverse = ReverseMatcher(sbert_recall=sbert, skill_calculator=skill_calc)
-    return {
-        "bundle": bundle,
-        "data": data,
-        "loader": loader,
-        "lightgcn": lightgcn,
-        "user_embeddings": user_embeddings,
-        "item_embeddings": item_embeddings,
-        "sbert": sbert,
-        "skill_calc": skill_calc,
-        "ranker": ranker,
-        "graph_loader": graph_loader,
-        "graph_store": graph_store,
-        "graph_source": graph_source,
-        "llm": llm,
-        "event_store": event_store,
-        "profile_store": profile_store,
-        "analyzer": analyzer,
-        "reverse": reverse,
-        "started_at": time.time(),
-        "requests": 0,
-        "total_latency_ms": 0.0,
-    }
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.pipeline = _load_pipeline()
     yield
-    graph = app.state.pipeline.get("graph_store")
-    if hasattr(graph, "close"):
-        graph.close()
 
 
-app = FastAPI(title="JobRec-KG API", version="2.2", lifespan=lifespan)
+app = FastAPI(title="JobRec-Feed Interview Demo", version="4.0", lifespan=lifespan)
 
 
-@app.middleware("http")
-async def timing_middleware(request: Request, call_next):
-    start = time.perf_counter()
-    response = await call_next(request)
-    elapsed = (time.perf_counter() - start) * 1000
-    if hasattr(request.app.state, "pipeline"):
-        pipeline = request.app.state.pipeline
-        pipeline["requests"] += 1
-        pipeline["total_latency_ms"] += elapsed
-    response.headers["X-Process-Time-Ms"] = f"{elapsed:.2f}"
-    return response
+def get_pipeline(request: Request) -> Pipeline:
+    pipeline = getattr(request.app.state, "pipeline", None)
+    if pipeline is None:
+        raise HTTPException(status_code=503, detail="model bundle is not ready")
+    return pipeline
 
 
-def get_pipeline(request: Request) -> dict:
-    if not hasattr(request.app.state, "pipeline"):
-        raise HTTPException(status_code=503, detail="Model bundle is not ready")
-    return request.app.state.pipeline
-
-
-def _extract_skills(resume_text: str, data) -> Dict[str, str]:
-    normalized = resume_text.casefold()
+def _extract_skills(text: str, data: GraphEntities) -> dict[str, str]:
+    normalized = text.casefold()
     return {
         skill.id: "beginner"
         for skill in data.skills
@@ -275,388 +210,208 @@ def _extract_skills(resume_text: str, data) -> Dict[str, str]:
     }
 
 
-def _candidate_jobs(data, title: Optional[str]):
-    if not title or not title.strip():
-        return data.jobs
-    query = title.casefold().strip()
-    matches = [job for job in data.jobs if query in job.title.casefold()]
-    if not matches:
-        raise HTTPException(status_code=404, detail=f"No job matches title: {title}")
-    return matches
-
-
-def _target_job(data, job_id: Optional[str], title: Optional[str]):
-    if job_id:
-        match = next((job for job in data.jobs if job.id == job_id), None)
-        if match is None:
-            raise HTTPException(status_code=404, detail=f"Unknown job_id: {job_id}")
-        return match
-    if not title:
-        raise HTTPException(
-            status_code=422,
-            detail="Competency assessment requires job_id or exact title",
-        )
-    matches = [
-        job for job in data.jobs if job.title.casefold() == title.casefold().strip()
-    ]
-    if len(matches) != 1:
-        raise HTTPException(
-            status_code=409, detail="Title is ambiguous; select a job_id"
-        )
-    return matches[0]
-
-
-def _require_profile_owner_or_admin(claims: dict, user_id: str) -> None:
-    if claims["role"] != "admin" and claims["sub"] != user_id:
-        raise HTTPException(
-            status_code=403, detail="Cannot access another user's private profile"
-        )
-
-
-@app.post("/api/token")
-def token(req: TokenRequest):
-    role = (
-        "admin"
-        if req.username == "admin"
-        else "recruiter" if req.username == "recruiter" else "user"
+def _profile(
+    pipeline: Pipeline, user_id: str | None, resume_text: str
+) -> tuple[str, dict[str, str], str]:
+    users = {user.id: user for user in pipeline.data.users}
+    known = bool(user_id and user_id in pipeline.bundle.user_id_to_idx)
+    resume = resume_text.strip() or (
+        (users[user_id].resume_text or "") if known and user_id is not None else ""
     )
-    if role == "admin":
-        expected = os.environ.get("JOBREC_ADMIN_PASSWORD", "jobrec-admin-demo")
-    elif role == "recruiter":
-        expected = os.environ.get("JOBREC_RECRUITER_PASSWORD", "jobrec-recruiter-demo")
+    if known and not resume_text.strip() and user_id is not None:
+        skills = {
+            skill_id: str(getattr(level, "value", level))
+            for skill_id, level in users[user_id].skills.items()
+        }
     else:
-        expected = os.environ.get("JOBREC_DEMO_PASSWORD", "jobrec-demo")
-    if not hmac.compare_digest(req.password, expected):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    return {
-        "access_token": issue_token(req.username, role),
-        "token_type": "bearer",
-        "role": role,
-    }
+        skills = _extract_skills(resume, pipeline.data)
+    return resume, skills, "known_hybrid" if known else "cold_start_text_skill"
+
+
+def _recent_job_texts(pipeline: Pipeline, user_id: str, limit: int = 5) -> list[str]:
+    seen = set(pipeline.bundle.train_items_by_user.get(user_id, []))
+    jobs = {job.id: job for job in pipeline.data.jobs}
+    recent = sorted(
+        (
+            interaction
+            for interaction in pipeline.data.interactions
+            if interaction.user_id == user_id and interaction.job_id in seen
+        ),
+        key=lambda row: row.timestamp,
+        reverse=True,
+    )[:limit]
+    return [jobs[row.job_id].description for row in recent]
 
 
 @app.get("/health/live")
-def live():
+def live() -> dict[str, str]:
     return {"status": "ok"}
 
 
 @app.get("/health/ready")
-def ready(request: Request):
-    if not hasattr(request.app.state, "pipeline"):
-        raise HTTPException(status_code=503, detail="not ready")
-    pipeline = request.app.state.pipeline
-    return {
-        "status": "ready",
-        "model_version": pipeline["bundle"].model_version,
-        "graph": pipeline["graph_store"].healthcheck(),
-    }
+def ready(request: Request) -> dict[str, str]:
+    pipeline = get_pipeline(request)
+    return {"status": "ready", "model_version": pipeline.bundle.model_version}
 
 
 @app.get("/api/model")
-def model_info(
-    request: Request, _=Depends(require_roles("user", "recruiter", "admin"))
-):
-    pipeline = get_pipeline(request)
-    bundle = pipeline["bundle"]
+def model_info(request: Request) -> dict[str, Any]:
+    bundle = get_pipeline(request).bundle
     return {
         "model_version": bundle.model_version,
         "schema_version": bundle.schema_version,
         "created_at": bundle.created_at,
-        "graph_source": pipeline["graph_source"],
+        "data_sha256": bundle.data_sha256,
+        "checkpoint_sha256": bundle.checkpoint_sha256,
+        "serving_sha256": bundle.serving_sha256,
+        "training_config": bundle.training_config,
+        "ranking_kind": bundle.ranking_model["kind"],
     }
 
 
-@app.post(
-    "/api/profile",
-    response_model=PrivateProfileMutationResponse,
-)
-def upsert_private_profile(
-    req: PrivateProfileRequest,
-    request: Request,
-    claims=Depends(require_roles("user", "admin")),
-):
-    _require_profile_owner_or_admin(claims, req.user_id)
-    get_pipeline(request)["profile_store"].upsert(
-        req.user_id,
-        PrivateProfile.model_validate(req.model_dump(exclude={"user_id"})),
-    )
-    return PrivateProfileMutationResponse(
-        status="stored_encrypted", user_id=req.user_id
-    )
-
-
-@app.get("/api/profile/{user_id}", response_model=PrivateProfileResponse)
-def get_private_profile(
-    user_id: str,
-    request: Request,
-    claims=Depends(require_roles("user", "admin")),
-):
-    _require_profile_owner_or_admin(claims, user_id)
-    profile = get_pipeline(request)["profile_store"].get(user_id)
-    if profile is None:
-        raise HTTPException(status_code=404, detail="Private profile not found")
-    return PrivateProfileResponse(user_id=user_id, **profile.model_dump())
-
-
-@app.delete(
-    "/api/profile/{user_id}",
-    response_model=PrivateProfileMutationResponse,
-)
-def delete_private_profile(
-    user_id: str,
-    request: Request,
-    claims=Depends(require_roles("user", "admin")),
-):
-    _require_profile_owner_or_admin(claims, user_id)
-    deleted = get_pipeline(request)["profile_store"].delete(user_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Private profile not found")
-    return PrivateProfileMutationResponse(status="deleted", user_id=user_id)
-
-
-@app.post("/api/recommend", response_model=List[RecommendResponse])
-def recommend_jobs(
-    req: ResumeUpload, request: Request, claims=Depends(require_roles("user", "admin"))
-):
-    p = get_pipeline(request)
-    user_map = {user.id: user for user in p["data"].users}
-    known = bool(req.user_id and req.user_id in p["bundle"].user_id_to_idx)
-    if req.user_id and req.user_id != claims["sub"] and claims["role"] != "admin":
-        raise HTTPException(
-            status_code=403, detail="Cannot request another user's recommendations"
-        )
-    resume = req.resume_text.strip() or (
-        user_map[req.user_id].resume_text if known else ""
-    )
-    user_skills = _extract_skills(resume, p["data"])
-    if known and not req.resume_text.strip():
-        user_skills = {
-            key: str(value.value if hasattr(value, "value") else value)
-            for key, value in user_map[req.user_id].skills.items()
-        }
-    jobs = _candidate_jobs(p["data"], req.expected_job_title)
-    lg_scores: Dict[str, float] = {}
-    mode = "cold_start_semantic_skill"
-    if known:
-        mode = "hybrid_lightgcn_semantic_skill"
-        user_idx = p["bundle"].user_id_to_idx[req.user_id]
-        raw = (p["user_embeddings"][user_idx] @ p["item_embeddings"].T).detach().cpu()
-        seen = set(p["bundle"].train_items_by_user.get(req.user_id, []))
+@app.post("/api/recommend", response_model=list[Recommendation])
+def recommend(body: RecommendationRequest, request: Request) -> list[Recommendation]:
+    pipeline = get_pipeline(request)
+    resume, user_skills, mode = _profile(pipeline, body.user_id, body.resume_text)
+    jobs = pipeline.data.jobs
+    if body.title_query:
+        query = body.title_query.casefold().strip()
+        jobs = [job for job in jobs if query in job.title.casefold()]
+        if not jobs:
+            raise HTTPException(status_code=404, detail="no job matches title_query")
+    known = mode == "known_hybrid"
+    if known and body.user_id is not None:
+        seen = set(pipeline.bundle.train_items_by_user.get(body.user_id, []))
         jobs = [job for job in jobs if job.id not in seen]
-    job_ids = [job.id for job in jobs]
-    semantic = dict(
-        p["sbert"].recommend_for_text(resume, k=len(job_ids), job_ids=job_ids)
+    recent_job_texts: list[str] = []
+    if known and body.user_id is not None:
+        recent_job_texts = _recent_job_texts(pipeline, body.user_id)
+    if body.use_interest_expansion:
+        expansion = pipeline.expander.expand(resume, recent_job_texts)
+        ranking_text = expansion.profile.augmented_text(resume)
+    else:
+        expansion = pipeline.expander.expand("", [])
+        ranking_text = resume
+        expansion = ExpansionResult(expansion.profile, "disabled")
+    feature_by_job = pipeline.features.build(
+        user_id=body.user_id,
+        resume_text=ranking_text,
+        user_skills=user_skills,
+        jobs=jobs,
+        known_user=known,
     )
-    if known:
-        lg_scores = {
-            job_id: float(raw[p["bundle"].job_id_to_idx[job_id]]) for job_id in job_ids
-        }
-
-    features = []
-    coverage_by_job = {}
-    for job in jobs:
-        coverage = p["skill_calc"].calculate_coverage(
-            user_skills, job.required_skills, job.preferred_skills
-        )
-        coverage_by_job[job.id] = coverage
-        features.append(
-            RankingFeatures(
-                lightgcn_score=lg_scores.get(job.id, 0.0),
-                sbert_score=semantic.get(job.id, 0.0),
-                skill_coverage=_coverage_value(coverage),
-            )
-        )
-    ranked = p["ranker"].rank_with_explanations(features)[:10]
-    results: List[RecommendResponse] = []
-    event_user = req.user_id or claims["sub"]
+    candidates = merge_recall_routes(
+        pipeline.features.recall_routes(feature_by_job, known),
+        [job.id for job in jobs],
+        per_route_k=max(10, min(30, body.top_k * 3)),
+    )
+    candidate_by_id = {candidate.job_id: candidate for candidate in candidates}
+    jobs_by_id = {job.id: job for job in jobs}
+    candidate_jobs = [jobs_by_id[candidate.job_id] for candidate in candidates]
+    candidate_features = [feature_by_job[job.id] for job in candidate_jobs]
+    subject_id = body.user_id or f"cold-{uuid4().hex[:8]}"
     request_id = uuid4().hex
-    for index, score, contribution in ranked:
-        job = jobs[index]
-        impression_id = p["event_store"].record_impression(
-            event_user,
+    response: list[Recommendation] = []
+    ranked = pipeline.ranker.rank_with_explanations(candidate_features)
+    for index, score, contributions in pipeline.reranker.rerank(
+        ranked, candidate_jobs, body.top_k
+    ):
+        job = candidate_jobs[index]
+        recall_sources = candidate_by_id[job.id].sources
+        impression_id = pipeline.events.record_impression(
+            subject_id,
             job.id,
-            p["bundle"].model_version,
+            pipeline.bundle.model_version,
             {
-                "rank": len(results) + 1,
                 "request_id": request_id,
-                "retrieval_mode": mode,
+                "rank": len(response) + 1,
+                "mode": mode,
+                "recall_sources": recall_sources,
+                "generation_mode": expansion.mode,
             },
         )
-        results.append(
-            RecommendResponse(
+        response.append(
+            Recommendation(
                 request_id=request_id,
                 impression_id=impression_id,
+                subject_id=subject_id,
                 job_id=job.id,
                 title=job.title,
-                score=round(score, 4),
+                score=round(score, 6),
                 contributions={
-                    "lightgcn": round(contribution["lightgcn_score"], 4),
-                    "sbert": round(contribution["sbert_score"], 4),
-                    "coverage": round(contribution["skill_coverage"], 4),
+                    key: round(value, 6) for key, value in contributions.items()
                 },
+                recall_sources=recall_sources,
                 retrieval_mode=mode,
-                model_version=p["bundle"].model_version,
+                generation_mode=expansion.mode,
+                expanded_interests=expansion.profile.interests,
+                model_version=pipeline.bundle.model_version,
             )
         )
-    return results
+    return response
 
 
 @app.post("/api/competency", response_model=CompetencyReport)
-def assess_competency(
-    req: ResumeUpload, request: Request, _=Depends(require_roles("user", "admin"))
-):
-    p = get_pipeline(request)
-    job = _target_job(p["data"], req.job_id, req.expected_job_title)
-    user_map = {user.id: user for user in p["data"].users}
-    if req.resume_text.strip():
-        user_skills = _extract_skills(req.resume_text, p["data"])
-    elif req.user_id in user_map:
-        user_skills = {
-            key: str(value.value if hasattr(value, "value") else value)
-            for key, value in user_map[req.user_id].skills.items()
-        }
-    else:
-        user_skills = {}
-    coverage = p["skill_calc"].calculate_coverage(
+def competency(body: CompetencyRequest, request: Request) -> CompetencyReport:
+    pipeline = get_pipeline(request)
+    job = next((item for item in pipeline.data.jobs if item.id == body.job_id), None)
+    if job is None:
+        raise HTTPException(status_code=404, detail="unknown job_id")
+    _, user_skills, _ = _profile(pipeline, body.user_id, body.resume_text)
+    coverage = pipeline.skills.calculate_coverage(
         user_skills, job.required_skills, job.preferred_skills
     )
-    gap_dict = {
-        item["skill_id"]: {
-            "user_level": item.get("user_level"),
-            "required_level": item["required_level"],
-        }
-        for item in coverage["skill_gap"]
-    }
-    if req.user_id in user_map and not req.resume_text.strip():
-        graph_evidence = p["graph_store"].competency_evidence(req.user_id, job.id)
-        graph_paths = graph_evidence.get("paths", [])
-        evidence_source = p["graph_source"]
-    else:
-        graph_paths = p["graph_loader"].find_paths_for_skills(user_skills, job.id)
-        evidence_source = "typed_in_memory_graph"
-    fallback = fallback_advice(gap_dict)
-    prompt = json.dumps(
-        {
-            "job_id": job.id,
-            "skill_gaps": gap_dict,
-            "graph_paths": graph_paths,
-            "instruction": "Return the required career-advice JSON schema.",
-        }
-    )
-    try:
-        advice = validate_advice(p["llm"].generate(prompt, temperature=0.2)["response"])
-    except Exception:
-        advice = fallback
+    paths = pipeline.graph.find_paths_for_skills(user_skills, job.id)
+    path_targets = {item["skills"][-1] for item in paths}
+    for gap in coverage["skill_gap"]:
+        if gap["skill_id"] not in path_targets:
+            paths.append(
+                {
+                    "skills": [gap["skill_id"]],
+                    "evidence": [],
+                    "note": "direct learning target; no prerequisite path in demo graph",
+                }
+            )
     return CompetencyReport(
         job_id=job.id,
-        overall_match=round(_coverage_value(coverage), 4),
-        skill_coverage=f"{coverage['coverage_score']:.0%}",
-        gaps=[{"skill_id": key, **value} for key, value in gap_dict.items()],
-        learning_paths=[step.model_dump() for step in advice.learning_path],
-        graph_paths=graph_paths,
-        advice_summary=advice.summary,
-        evidence_source=evidence_source,
+        overall_match=round(float(coverage["coverage_score"]), 6),
+        gaps=coverage["skill_gap"],
+        learning_paths=paths[:8],
+        evidence_source="typed_in_memory_graph",
     )
-
-
-@app.post("/api/recruit/match", response_model=List[CandidateMatch])
-def recruit_match(
-    request: Request,
-    job_id: str = Query(...),
-    top_k: int = Query(20, ge=1, le=100),
-    _=Depends(require_roles("recruiter", "admin")),
-):
-    p = get_pipeline(request)
-    job = _target_job(p["data"], job_id, None)
-    candidate_skills = {user.id: user.skills for user in p["data"].users}
-    matches = p["reverse"].match_candidates(
-        job.id,
-        job.required_skills,
-        job.preferred_skills,
-        list(candidate_skills),
-        candidate_skills,
-        top_k=top_k,
-    )
-    return [
-        CandidateMatch(
-            user_id=item.user_id,
-            score=item.score,
-            matched_skills=item.matched_skills[:5],
-            missing_skills=item.missing_skills[:5],
-        )
-        for item in matches
-    ]
 
 
 @app.post("/api/feedback", response_model=FeedbackResponse)
-def submit_feedback(
-    req: FeedbackRequest,
-    request: Request,
-    claims=Depends(require_roles("user", "admin")),
-):
-    p = get_pipeline(request)
-    if req.user_id != claims["sub"] and claims["role"] != "admin":
-        raise HTTPException(
-            status_code=403, detail="Cannot submit feedback for another user"
-        )
+def feedback(body: FeedbackRequest, request: Request) -> FeedbackResponse:
+    pipeline = get_pipeline(request)
     try:
-        p["event_store"].record_feedback(
-            req.impression_id,
-            req.user_id,
-            req.job_id,
-            p["bundle"].model_version,
-            req.satisfied,
+        pipeline.events.record_feedback(
+            body.impression_id,
+            body.subject_id,
+            body.job_id,
+            pipeline.bundle.model_version,
+            body.satisfied,
+            clicked=body.clicked,
+            dwell_seconds=body.dwell_seconds,
+            saved=body.saved,
+            applied=body.applied,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    stats = p["event_store"].effectiveness()
-    return {
-        "status": "recorded",
-        "impression_id": req.impression_id,
-        **stats,
-        "pass_threshold": stats["effectiveness"] >= 0.8,
-    }
-
-
-@app.get("/api/effectiveness", response_model=EffectivenessResponse)
-def effectiveness_report(request: Request, _=Depends(require_roles("admin"))):
-    stats = get_pipeline(request)["event_store"].effectiveness()
-    return EffectivenessResponse(
-        **stats, pass_threshold=stats["effectiveness"] >= 0.8, threshold=0.8
+    stats = pipeline.events.effectiveness()
+    return FeedbackResponse(
+        status="recorded",
+        feedback_count=stats["n_total"],
+        satisfied_count=stats["n_satisfied"],
+        satisfaction_rate=stats["effectiveness"],
     )
-
-
-@app.get("/api/trends/hot-jobs", response_model=TrendReport)
-def hot_jobs(request: Request, _=Depends(require_roles("user", "recruiter", "admin"))):
-    analyzer = get_pipeline(request)["analyzer"]
-    return TrendReport(
-        hot_jobs=analyzer.hot_jobs(10), hot_skills=analyzer.hot_skills(15)
-    )
-
-
-@app.get("/api/metrics")
-def service_metrics(request: Request, _=Depends(require_roles("admin"))):
-    p = get_pipeline(request)
-    return {
-        "requests": p["requests"],
-        "mean_latency_ms": p["total_latency_ms"] / max(p["requests"], 1),
-        "uptime_seconds": time.time() - p["started_at"],
-        "model_version": p["bundle"].model_version,
-    }
 
 
 @app.get("/demo", response_class=HTMLResponse)
-def demo_page():
-    return """<!doctype html><html><head><meta charset='utf-8'><title>JobRec-KG Demo</title>
-<style>body{font:16px system-ui;max-width:960px;margin:40px auto;color:#17324d}textarea,input{width:100%;padding:10px;margin:6px 0}button{padding:10px 18px;background:#2f6b9a;color:white;border:0;border-radius:5px}pre{background:#eef3f7;padding:16px;white-space:pre-wrap}</style></head>
-<body><h1>JobRec-KG Evidence Demo</h1><p>This page calls the same authenticated API used by clients.</p>
-<input id='user' value='user_001'><input id='password' type='password' value='jobrec-demo'>
-<textarea id='resume'>Python SQL Docker machine learning</textarea><button onclick='run()'>Recommend</button><pre id='out'></pre>
-<script>async function run(){let u=document.querySelector('#user').value,p=document.querySelector('#password').value;
-let t=await fetch('/api/token',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:u,password:p})}).then(r=>r.json());
-let x=await fetch('/api/recommend',{method:'POST',headers:{'content-type':'application/json','authorization':'Bearer '+t.access_token},body:JSON.stringify({user_id:u,resume_text:document.querySelector('#resume').value})}).then(r=>r.json());
-document.querySelector('#out').textContent=JSON.stringify(x,null,2)}</script></body></html>"""
-
-
-def create_app() -> FastAPI:
-    return app
+def demo() -> str:
+    return """<!doctype html><meta charset='utf-8'><title>JobRec-Feed</title>
+<style>body{font:16px system-ui;max-width:900px;margin:40px auto}textarea,input{width:100%;padding:8px;margin:5px}button{padding:10px}pre{background:#f4f5f7;padding:16px}</style>
+<h1>JobRec-Feed 面试演示</h1><p>所有数据均为固定种子半合成数据。</p>
+<input id='uid' value='user_001'><textarea id='resume'>Python SQL Docker</textarea>
+<button onclick='run()'>推荐</button><pre id='out'></pre>
+<script>async function run(){const body={user_id:uid.value,resume_text:resume.value};const r=await fetch('/api/recommend',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});out.textContent=JSON.stringify(await r.json(),null,2)}</script>"""

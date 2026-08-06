@@ -83,7 +83,12 @@ class EventStore:
         user_id: str,
         job_id: str,
         model_version: str,
-        satisfied: bool,
+        satisfied: bool | None,
+        *,
+        clicked: bool = False,
+        dwell_seconds: float = 0.0,
+        saved: bool = False,
+        applied: bool = False,
     ) -> None:
         """Record one feedback event for the exact matching impression."""
         with self._connect() as db:
@@ -121,7 +126,16 @@ class EventStore:
                     job_id,
                     model_version,
                     impression_id,
-                    json.dumps({"satisfied": satisfied}, sort_keys=True),
+                    json.dumps(
+                        {
+                            "satisfied": satisfied,
+                            "clicked": clicked,
+                            "dwell_seconds": dwell_seconds,
+                            "saved": saved,
+                            "applied": applied,
+                        },
+                        sort_keys=True,
+                    ),
                 ),
             )
 
@@ -135,7 +149,10 @@ class EventStore:
         satisfied: Dict[str, int] = {}
         for row in rows:
             uid = row["user_id"]
-            value = bool(json.loads(row["payload"]).get("satisfied"))
+            payload = json.loads(row["payload"])
+            if payload.get("satisfied") is None:
+                continue
+            value = bool(payload["satisfied"])
             totals[uid] = totals.get(uid, 0) + 1
             satisfied[uid] = satisfied.get(uid, 0) + int(value)
         n_total = sum(totals.values())

@@ -1,55 +1,22 @@
-# 外部资料目录
+# 外部资料边界
 
-`ref/` 保存论文、技术文章导出和历史赛题文件，只用于理解问题与解释技术选型。
+`ref/` 保存论文、技术文章导出和历史赛题文件，只用于理解问题与解释技术选择，不是本
+项目实现、实验、性能或业务效果的证据。PDF 可能受版权和许可约束，对外分发前需核对。
 
-> 外部资料不是本项目实现、实验、性能或业务效果的证据。引用标题、作者、年份、
-> 数据集和数字前必须回到原文件核对；技术博客和二次转载还应核对原始来源。
+## 核心阅读
+
+| 主题 | 本地资料 | 当前用途 |
+|---|---|---|
+| 协同过滤 | [`LightGCN.pdf`](papers/LightGCN.pdf) | 解释简化图传播与隐式反馈 |
+| 文本向量 | [`Sentence-BERT`](<papers/Sentence-BERT- Sentence Embeddings using Siamese BERT-Networks.pdf>) | 未来预训练文本方案背景；当前实现只用 hashing |
+| 招聘推荐综述 | [`systematic review`](<papers/Job recommender systems- a systematic literature review, applications, open issues, and challenges.pdf>) | 冷启动、双向匹配和评估问题背景 |
+| 可解释推荐 | [`OKRA`](<papers/OKRA An Explainable, Heterogeneous, Multi-stakeholder Job Recommender System.pdf>) | 图路径解释的外部思路 |
+| 历史任务 | [`赛题.pdf`](赛题.pdf) | 原始题目和目标；目标不等于当前结果 |
 
 ## 使用规则
 
-1. 本项目行为以代码和测试为准，数值以 `results/` 为准。
-2. 可以说“受某论文/实践启发”，不能说“本项目复现了其指标”，除非仓库保留了
-   相同数据、协议、代码和结果。
-3. 不把外部生产规模、CTR、延迟或模型提升复制到简历和项目文档中。
-4. 新增资料时保留可识别标题，记录完整书目信息和获取来源；不要再创建逐篇长篇
-   摘要、路线图或“预期收益”表。
-5. PDF 可能受版权和许可约束，不对外重新分发前应确认使用权限。
-
-## 核心阅读入口
-
-| 主题 | 本地资料 | 用途 |
-|---|---|---|
-| 协同过滤 | [`LightGCN.pdf`](papers/LightGCN.pdf) | LightGCN 简化传播与隐式反馈推荐背景 |
-| 文本向量 | [`Sentence-BERT`](<papers/Sentence-BERT- Sentence Embeddings using Siamese BERT-Networks.pdf>) | 双塔句向量与文本召回背景 |
-| 招聘推荐综述 | [`systematic literature review`](<papers/Job recommender systems- a systematic literature review, applications, open issues, and challenges.pdf>) | 冷启动、双向匹配、解释和评估问题 |
-| 可解释招聘推荐 | [`OKRA`](<papers/OKRA An Explainable, Heterogeneous, Multi-stakeholder Job Recommender System.pdf>) | 异构实体、路径解释和多方目标背景 |
-| 人岗匹配 | [`Modeling Two-Way Selection Preference`](<papers/Modeling Two-Way Selection Preference for Person-Job Fit.pdf>) | 双向选择问题定义 |
-| 行业系统 | [`LinkedIn job recommendation`](<papers/Personalized Job Recommendation System at LinkedIn- Practical Challenges and Lessons Learned.pdf>) | 工业流程与约束的外部案例 |
-| 图岗位推荐 | [`graph-based employer recommendation`](<papers/Job Seeker Recommendation for Employers A Graph-Based Recommendation Approach Using Node Embedding.pdf>) | 招聘方反向匹配背景 |
-| 技能与岗位 | [`Skills2Job`](<papers/Skills2Job--A-recommender-system-that-encodes-job-offer-_2021_Applied-Soft-C.pdf>) | 技能表达与岗位推荐背景 |
-| 历史任务 | [`赛题.pdf`](赛题.pdf) | 项目最初题目和目标；目标不等于当前已验证结果 |
-
-### 用户模拟与反馈偏差
-
-以下来源通过正式网页引用，未把论文指标复制为本项目结果：
-
-| 文献 | 本项目使用方式 |
-|---|---|
-| [Ie et al., RecSim, 2019](https://research.google/pubs/recsim-a-configurable-simulation-platform-for-recommender-systems/) | 将 Persona 潜在偏好与选择/响应行为分层 |
-| [Agarwal et al., Position Bias Estimation, 2019](https://research.google/pubs/position-bias-estimation-for-unbiased-learning-to-rank-in-personal-search/) | 用 rank examination curve 表达位置观察偏差 |
-| [Horton, NAACL 2024](https://aclanthology.org/2024.naacl-long.83/) | 设计结构化代理评估，并保留 prompt/模型敏感性边界 |
-| [Zhang et al., AAAI 2025](https://ojs.aaai.org/index.php/AAAI/article/view/33456) | 参考 LLM 推理与统计参与度模型的组合思路 |
-| [Kim et al., EACL 2026](https://aclanthology.org/2026.eacl-long.244/) | 明确记录 prompt-only 用户模拟的 realism gap |
-
-其他材料保存在 [`papers/`](papers/)；文件名即当前的最小本地索引。需要正式发表或
-提交材料时，应另行生成经核对的标准参考文献列表，而不是依赖文件名猜测书目信息。
-
-## 与当前项目的边界
-
-- 当前文本实验默认是 feature hashing，并未复现 SBERT 论文结果。
-- 当前 GAT 使用半合成图和代理监督，并未复现外部图推荐论文结果。
-- 当前 Neo4j、FastAPI、LLM 和向量检索资料只提供工程思路，外部平台指标不能外推。
-- 当前公平性材料只能帮助设计未来审计，无法替代合法真实属性与治理流程。
-
-本项目的可引用本地证据见
-[`../docs/data-and-evaluation.md`](../docs/data-and-evaluation.md)。
+1. 外部论文可以支持技术选择和推导依据，不能把论文指标写成本项目实测；
+2. 引用数字时回到原文件核对数据、协议、硬件和年份；
+3. 生产规模、CTR、延迟和提升不得移植到简历；
+4. 若用外部基准推导预期，必须说明差异、假设、范围和本地验证计划；
+5. `papers/` 中其余文件是候选阅读材料，不意味着对应技术已经实现。

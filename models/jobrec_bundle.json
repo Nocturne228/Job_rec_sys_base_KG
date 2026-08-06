@@ -1,30 +1,40 @@
 {
-  "schema_version": 1,
-  "model_version": "semi-synthetic-v1-seed42",
-  "created_at": "2026-07-15T04:43:13.030939+00:00",
+  "schema_version": 3,
+  "model_version": "jobrec-feed-07a2a9ac74aae85e",
+  "created_at": "2026-08-06T13:23:30.306841+00:00",
   "data_seed": 42,
-  "lightgcn_checkpoint": "lightgcn_model.pt",
+  "data_sha256": "2b1e808db6f2d6205623ee9ae39d12a269d9a8db0eac01f114ad25b1e7a40419",
+  "checkpoint_path": "lightgcn-74d383279587.pt",
+  "checkpoint_sha256": "74d383279587e19e7a4f887b692d5ec7171373d39eb40dbb712c1b90ea83874f",
+  "serving_sha256": "07a2a9ac74aae85e31d163b0bc097bbbb21859fd4893508f026f89f8977430cd",
+  "training_config": {
+    "embedding_dim": 32,
+    "n_layers": 2,
+    "epochs": 20,
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "seed": 42
+  },
   "user_id_to_idx": {
     "user_001": 0,
-    "user_002": 1,
-    "user_003": 2,
-    "user_004": 3,
-    "user_005": 4,
-    "user_006": 5,
-    "user_007": 6,
-    "user_008": 7,
-    "user_009": 8,
-    "user_010": 9,
-    "user_011": 10,
-    "user_012": 11,
-    "user_013": 12,
-    "user_014": 13,
-    "user_015": 14,
-    "user_016": 15,
-    "user_017": 16,
-    "user_018": 17,
-    "user_019": 18,
-    "user_020": 19
+    "user_003": 1,
+    "user_004": 2,
+    "user_005": 3,
+    "user_006": 4,
+    "user_007": 5,
+    "user_008": 6,
+    "user_009": 7,
+    "user_010": 8,
+    "user_011": 9,
+    "user_012": 10,
+    "user_013": 11,
+    "user_014": 12,
+    "user_015": 13,
+    "user_016": 14,
+    "user_017": 15,
+    "user_018": 16,
+    "user_019": 17,
+    "user_020": 18
   },
   "job_id_to_idx": {
     "job_001": 0,
@@ -80,263 +90,137 @@
   },
   "train_items_by_user": {
     "user_001": [
-      "job_002",
-      "job_010",
-      "job_016",
-      "job_017",
-      "job_020",
-      "job_023",
-      "job_034",
-      "job_035",
+      "job_009",
+      "job_011",
+      "job_021",
       "job_043"
     ],
-    "user_002": [
-      "job_001",
-      "job_003",
-      "job_007",
-      "job_008",
-      "job_026",
-      "job_031"
-    ],
     "user_003": [
-      "job_005",
-      "job_013",
       "job_024",
       "job_033",
-      "job_036",
-      "job_040",
-      "job_048",
-      "job_050"
+      "job_034"
     ],
     "user_004": [
-      "job_004",
-      "job_008",
+      "job_011",
       "job_013",
-      "job_014",
-      "job_019",
-      "job_033",
-      "job_045",
-      "job_047",
-      "job_048"
+      "job_041",
+      "job_046"
     ],
     "user_005": [
-      "job_012",
-      "job_019",
-      "job_032",
-      "job_041",
-      "job_047",
-      "job_049",
-      "job_050"
+      "job_021"
     ],
     "user_006": [
-      "job_002",
-      "job_004",
-      "job_007",
-      "job_010",
-      "job_011",
-      "job_014",
-      "job_025",
-      "job_027",
-      "job_031",
-      "job_033",
-      "job_045",
-      "job_047",
+      "job_040",
       "job_049"
     ],
     "user_007": [
-      "job_005",
-      "job_010",
-      "job_014",
-      "job_020",
-      "job_021",
-      "job_023",
-      "job_035",
-      "job_036",
-      "job_037",
-      "job_039",
-      "job_046"
-    ],
-    "user_008": [
-      "job_001",
-      "job_008",
-      "job_019",
-      "job_027",
-      "job_046"
-    ],
-    "user_009": [
-      "job_002",
-      "job_012",
-      "job_013",
-      "job_016",
-      "job_020",
-      "job_024",
-      "job_030",
-      "job_037",
-      "job_042",
-      "job_046"
-    ],
-    "user_010": [
-      "job_005",
-      "job_008",
-      "job_014",
-      "job_015",
-      "job_016",
-      "job_021",
-      "job_024",
-      "job_027",
-      "job_031",
-      "job_034",
-      "job_036",
-      "job_043",
-      "job_044",
-      "job_049"
-    ],
-    "user_011": [
-      "job_001",
-      "job_002",
-      "job_003",
-      "job_020",
-      "job_021",
-      "job_025",
-      "job_031",
-      "job_034",
-      "job_041",
-      "job_046"
-    ],
-    "user_012": [
-      "job_004",
-      "job_011",
-      "job_015",
-      "job_018",
-      "job_019",
-      "job_024",
-      "job_026",
-      "job_027",
-      "job_042",
-      "job_048"
-    ],
-    "user_013": [
-      "job_001",
-      "job_013",
-      "job_018",
-      "job_020",
-      "job_022",
+      "job_007",
       "job_031",
       "job_038",
-      "job_040",
       "job_041",
-      "job_046"
-    ],
-    "user_014": [
-      "job_011",
-      "job_012",
-      "job_023",
-      "job_026",
-      "job_038",
-      "job_039",
-      "job_045",
-      "job_046",
-      "job_047",
-      "job_049",
       "job_050"
     ],
-    "user_015": [
-      "job_003",
-      "job_007",
-      "job_008",
-      "job_010",
-      "job_011",
-      "job_013",
-      "job_016",
-      "job_019",
-      "job_022",
-      "job_025",
-      "job_032",
-      "job_034",
-      "job_035",
-      "job_036",
+    "user_008": [
+      "job_027"
+    ],
+    "user_009": [
+      "job_017",
       "job_039",
-      "job_041",
-      "job_042",
-      "job_047"
+      "job_049"
     ],
-    "user_016": [
-      "job_011",
-      "job_021",
-      "job_024",
-      "job_025",
-      "job_027",
-      "job_031",
-      "job_034",
-      "job_036",
-      "job_041"
+    "user_010": [
+      "job_033"
     ],
-    "user_017": [
+    "user_011": [
+      "job_025"
+    ],
+    "user_012": [
+      "job_046"
+    ],
+    "user_013": [
+      "job_030",
+      "job_042"
+    ],
+    "user_014": [
+      "job_007"
+    ],
+    "user_015": [
       "job_007",
       "job_009",
-      "job_016",
-      "job_029",
-      "job_037",
-      "job_038"
+      "job_031"
+    ],
+    "user_016": [
+      "job_001",
+      "job_016"
+    ],
+    "user_017": [
+      "job_021"
     ],
     "user_018": [
-      "job_006",
-      "job_014",
-      "job_019",
-      "job_032",
-      "job_034",
-      "job_047"
+      "job_026",
+      "job_045"
     ],
     "user_019": [
-      "job_013",
-      "job_030",
-      "job_033",
-      "job_034",
-      "job_042",
-      "job_043"
+      "job_020"
     ],
     "user_020": [
-      "job_003",
-      "job_005",
-      "job_006",
-      "job_012",
-      "job_013",
-      "job_020",
-      "job_025",
-      "job_030",
-      "job_036",
-      "job_042",
-      "job_046",
-      "job_047"
+      "job_019",
+      "job_021"
     ]
   },
-  "skill_weights": {
-    "python": 0.5274049043655396,
-    "java": 0.5274049043655396,
-    "javascript": 0.5274049043655396,
-    "react": 0.5227439403533936,
-    "vue": 0.5227439403533936,
-    "nodejs": 0.5227439403533936,
-    "docker": 0.5274049043655396,
-    "kubernetes": 0.5227439403533936,
-    "aws": 0.5227439403533936,
-    "azure": 0.5227439403533936,
-    "gcp": 0.5227439403533936,
-    "sql": 0.5274049043655396,
-    "mongodb": 0.5274049043655396,
-    "postgresql": 0.5227439403533936,
-    "pytorch": 0.8110406994819641,
-    "tensorflow": 0.8110406994819641,
-    "scikit": 0.5274049043655396,
-    "pandas": 0.5227439403533936,
-    "numpy": 0.5227439403533936,
-    "communication": 0.5274049043655396,
-    "leadership": 0.5227439403533936,
-    "problem_solving": 0.5274049043655396
-  },
   "ranking_weights": {
-    "lightgcn_score": 0.4,
-    "sbert_score": 0.3,
-    "skill_coverage": 0.3
+    "lightgcn": 0.4,
+    "text": 0.3,
+    "skill": 0.3
+  },
+  "ranking_model": {
+    "kind": "standardized_logistic",
+    "feature_names": [
+      "lightgcn",
+      "text",
+      "skill",
+      "popularity",
+      "freshness",
+      "recent_interest"
+    ],
+    "means": [
+      0.03656013617267011,
+      0.14089163691963333,
+      0.14456541218637997,
+      0.928763440860215,
+      0.6535842293906803,
+      0.20741730840695977
+    ],
+    "scales": [
+      0.11813585395615295,
+      0.08345327100641554,
+      0.15963040933683376,
+      1.0380687082098687,
+      0.22123120595801848,
+      0.17513001022641064
+    ],
+    "coefficients": [
+      3.4336144118282808,
+      -0.13715174248549705,
+      0.1597300284619374,
+      0.31782528836361645,
+      0.13426234536910356,
+      1.812279125097947
+    ],
+    "intercept": -3.784920501803184,
+    "training": {
+      "n_exposures": 372,
+      "n_positive": 39,
+      "positive_rate": 0.10483870967741936,
+      "label_definition": "clicked OR saved OR applied OR dwell_seconds>=20"
+    }
+  },
+  "text_config": {
+    "kind": "feature_hashing",
+    "n_features": 512
+  },
+  "reranking_config": {
+    "diversity_penalty": 0.12,
+    "freshness_bonus": 0.05
   }
 }

@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from scipy import sparse
+from scipy import sparse  # type: ignore[import-untyped]
 
 
 class LightGCN(nn.Module):
@@ -207,24 +207,27 @@ class LightGCN(nn.Module):
 
     def _l2_loss(self, *tensors) -> torch.Tensor:
         """Compute L2 regularization loss."""
-        loss = 0.0
+        loss = torch.tensor(0.0, device=tensors[0].device)
         for tensor in tensors:
             loss += tensor.norm(2).pow(2)
         return loss
 
     def save(self, path: str) -> None:
         """Save model state."""
-        torch.save(
-            {
-                "state_dict": self.state_dict(),
-                "n_users": self.n_users,
-                "n_items": self.n_items,
-                "embedding_dim": self.embedding_dim,
-                "n_layers": self.n_layers,
-                "dropout": self.dropout,
-            },
-            path,
-        )
+        # 传入文件对象可避免临时文件名进入 Torch ZIP archive，从而让同一状态的
+        # checkpoint 字节稳定，内容哈希才真正代表权重与配置。
+        with open(path, "wb") as stream:
+            torch.save(
+                {
+                    "state_dict": self.state_dict(),
+                    "n_users": self.n_users,
+                    "n_items": self.n_items,
+                    "embedding_dim": self.embedding_dim,
+                    "n_layers": self.n_layers,
+                    "dropout": self.dropout,
+                },
+                stream,
+            )
 
     @classmethod
     def load(cls, path: str, device: str = "cpu") -> "LightGCN":

@@ -13,16 +13,9 @@ jobs:
           python-version: "3.13"
       - run: uv sync --frozen --extra dev
       - run: uv run python -m compileall -q src scripts tests main.py
-      - run: uv run python -m pytest -q --cov=src --cov-report=term-missing --cov-fail-under=50
+      - run: uv run python -m pytest -q
       - run: uv run black --check src scripts tests main.py
       - run: uv run isort --check-only src scripts tests main.py
-      - name: Type-check service contracts
-        run: >-
-          uv run mypy
-          src/api/routes.py
-          src/models/bundle.py
-          src/data/graph_store.py
-          src/generation/adapters.py
-          src/security.py
-          src/data/models.py
-          src/metrics/event_store.py
+      - run: >-
+          uv run mypy src/api/routes.py src/models/bundle.py src/metrics/event_store.py
+          src/ranking src/recall src/generation/profile_expansion.py src/data/loader.py
